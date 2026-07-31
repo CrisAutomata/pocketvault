@@ -22,7 +22,10 @@ pub fn view(auth: &AuthState) -> Element<'_, Message> {
         ),
     };
 
-    let mut card = column![].spacing(12).padding(20).width(Length::Fixed(380.0));
+    let mut card = column![]
+        .spacing(12)
+        .padding(20)
+        .width(Length::Fixed(380.0));
 
     if matches!(auth.mode, AuthMode::ChangePassword) {
         card = card.push(field_label("Current Password"));

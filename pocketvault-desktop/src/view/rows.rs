@@ -7,14 +7,10 @@ use crate::state::{FileItem, FolderItem, FolderTreeRow};
 use crate::theme;
 
 pub fn badge<'a>(count: i64) -> Element<'a, Message> {
-    container(
-        text(count.to_string())
-            .size(11)
-            .color(theme::badge_text()),
-    )
-    .padding([2, 8])
-    .style(theme::container_with_bg(theme::badge_bg()))
-    .into()
+    container(text(count.to_string()).size(11).color(theme::badge_text()))
+        .padding([2, 8])
+        .style(theme::container_with_bg(theme::badge_bg()))
+        .into()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -32,7 +28,11 @@ pub fn sidebar_item<'a>(
     } else {
         text("📁").size(13).color(theme::folder_icon())
     };
-    let label_color = if is_lock { theme::danger() } else { theme::text() };
+    let label_color = if is_lock {
+        theme::danger()
+    } else {
+        theme::text()
+    };
 
     let mut content = row![
         icon,
@@ -66,7 +66,11 @@ pub fn sidebar_item<'a>(
 
 /// A row in the sidebar's expandable folder tree (VS Code Explorer style):
 /// indented by depth, with a chevron toggle only on rows that have children.
-pub fn folder_tree_row<'a>(item: &FolderTreeRow, selected: bool, expanded: bool) -> Element<'a, Message> {
+pub fn folder_tree_row<'a>(
+    item: &FolderTreeRow,
+    selected: bool,
+    expanded: bool,
+) -> Element<'a, Message> {
     let folder_id = item.id.clone();
     let folder_id_for_toggle = item.id.clone();
     let name = item.name.clone();
@@ -133,7 +137,10 @@ pub fn folder_row<'a>(item: &FolderItem, selected: bool) -> Element<'a, Message>
             button(text("Rename").size(11))
                 .padding([4, 8])
                 .style(|_theme, status| theme::secondary_button(status))
-                .on_press(Message::OpenRenameDialog(folder_id_for_rename, folder_name_for_rename)),
+                .on_press(Message::OpenRenameDialog(
+                    folder_id_for_rename,
+                    folder_name_for_rename
+                )),
             button(text("Delete").size(11))
                 .padding([4, 8])
                 .style(|_theme, status| theme::danger_button(status))

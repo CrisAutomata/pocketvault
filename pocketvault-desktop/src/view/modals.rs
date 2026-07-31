@@ -14,12 +14,17 @@ pub fn wrap<'a>(
     let card = match modal {
         None => return base,
         Some(Modal::NewFolder { name }) => new_folder_card(name),
-        Some(Modal::Rename { text: rename_text, .. }) => rename_card(rename_text),
+        Some(Modal::Rename {
+            text: rename_text, ..
+        }) => rename_card(rename_text),
         Some(Modal::DeleteConfirm { file_id, folder_id }) => {
             delete_confirm_card(file_id.is_some(), folder_id.is_some())
         }
         Some(Modal::ConfirmCancelJob) => {
-            let label = active_job.as_ref().map(|j| j.label.as_str()).unwrap_or("this job");
+            let label = active_job
+                .as_ref()
+                .map(|j| j.label.as_str())
+                .unwrap_or("this job");
             confirm_cancel_job_card(label)
         }
     };
@@ -34,7 +39,10 @@ pub fn wrap<'a>(
     stack![base, overlay].into()
 }
 
-fn modal_shell<'a>(height: f32, content: iced::widget::Column<'a, Message>) -> Element<'a, Message> {
+fn modal_shell<'a>(
+    height: f32,
+    content: iced::widget::Column<'a, Message>,
+) -> Element<'a, Message> {
     container(content.spacing(12).padding(20))
         .width(Length::Fixed(360.0))
         .height(Length::Fixed(height))

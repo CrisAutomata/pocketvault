@@ -1,0 +1,120 @@
+name: Main
+
+# Gatekeeper for `main`:
+#   - `fmt` / `clippy` / `build` / `test` run independently (in parallel) on
+#     every push to main and every PR targeting main — each shows up as its
+#     own check, so a failure tells you exactly which stage broke without
+#     opening logs. Pair this with a branch protection rule on `main`
+#     requiring these checks to pass before merge — this file only defines
+#     the checks, it can't enforce that by itself.
+#   - `revert-on-failure` only runs for direct pushes to main (not PRs). If
+#     any of the four checks fail, it reverts the breaking commit and pushes
+#     the revert straight to main so main stays green.
+#
+# IMPORTANT: `revert-on-failure` pushes directly to `main`. If branch
+# protection blocks direct pushes for everyone (recommended — see the repo
+# settings), this job's push will also be blocked unless the identity behind
+# `secrets.REVERT_TOKEN` is specifically allowed to bypass that rule. Without
+# such an exception, use this job's failure as a signal to revert by hand
+# instead. `REVERT_TOKEN` must be a PAT (not the default GITHUB_TOKEN, which
+# generally can't push to a protected branch) belonging to an account with
+# that bypass permission; add it as a repository secret.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  build:
+    name: build
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace
+
+  test:
+    name: test
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace
+
+  revert-on-failure:
+    name: Revert breaking push to main
+    needs: [fmt, clippy, build, test]
+    if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          token: ${{ secrets.REVERT_TOKEN }}
+
+      - name: Revert the breaking commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git revert --no-edit "${{ github.sha }}"
+          git push origin HEAD:main

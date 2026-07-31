@@ -182,7 +182,14 @@ mod tests {
         let key = generate_vault_key();
         let data = b"hello pocketvault";
         let mut buf = Vec::new();
-        write_pv(&mut buf, &key, &meta("hello.txt", data.len() as u64), &data[..], &AtomicBool::new(false)).unwrap();
+        write_pv(
+            &mut buf,
+            &key,
+            &meta("hello.txt", data.len() as u64),
+            &data[..],
+            &AtomicBool::new(false),
+        )
+        .unwrap();
 
         let (m, out) = read_pv(&mut Cursor::new(&buf), &key).unwrap();
         assert_eq!(out, data);
@@ -195,7 +202,14 @@ mod tests {
     fn roundtrip_empty() {
         let key = generate_vault_key();
         let mut buf = Vec::new();
-        write_pv(&mut buf, &key, &meta("empty.bin", 0), &b""[..], &AtomicBool::new(false)).unwrap();
+        write_pv(
+            &mut buf,
+            &key,
+            &meta("empty.bin", 0),
+            &b""[..],
+            &AtomicBool::new(false),
+        )
+        .unwrap();
 
         let (_, out) = read_pv(&mut Cursor::new(&buf), &key).unwrap();
         assert!(out.is_empty());
@@ -206,7 +220,14 @@ mod tests {
         let key = generate_vault_key();
         let data = vec![0xAAu8; CHUNK_SIZE];
         let mut buf = Vec::new();
-        write_pv(&mut buf, &key, &meta("chunk.bin", CHUNK_SIZE as u64), data.as_slice(), &AtomicBool::new(false)).unwrap();
+        write_pv(
+            &mut buf,
+            &key,
+            &meta("chunk.bin", CHUNK_SIZE as u64),
+            data.as_slice(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
 
         let (_, out) = read_pv(&mut Cursor::new(&buf), &key).unwrap();
         assert_eq!(out, data);
@@ -218,7 +239,14 @@ mod tests {
         // 3 chunks + partial
         let data: Vec<u8> = (0..220_000).map(|i| (i % 251) as u8).collect();
         let mut buf = Vec::new();
-        write_pv(&mut buf, &key, &meta("big.bin", data.len() as u64), data.as_slice(), &AtomicBool::new(false)).unwrap();
+        write_pv(
+            &mut buf,
+            &key,
+            &meta("big.bin", data.len() as u64),
+            data.as_slice(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
 
         let (_, out) = read_pv(&mut Cursor::new(&buf), &key).unwrap();
         assert_eq!(out, data);
@@ -228,7 +256,14 @@ mod tests {
     fn metadata_only_read() {
         let key = generate_vault_key();
         let mut buf = Vec::new();
-        write_pv(&mut buf, &key, &meta("photo.jpg", 99), &b"fake jpeg"[..], &AtomicBool::new(false)).unwrap();
+        write_pv(
+            &mut buf,
+            &key,
+            &meta("photo.jpg", 99),
+            &b"fake jpeg"[..],
+            &AtomicBool::new(false),
+        )
+        .unwrap();
 
         let m = read_pv_metadata(&mut Cursor::new(&buf), &key).unwrap();
         assert_eq!(m.original_name, "photo.jpg");
@@ -240,7 +275,14 @@ mod tests {
         let k1 = generate_vault_key();
         let k2 = generate_vault_key();
         let mut buf = Vec::new();
-        write_pv(&mut buf, &k1, &meta("f.bin", 4), &b"test"[..], &AtomicBool::new(false)).unwrap();
+        write_pv(
+            &mut buf,
+            &k1,
+            &meta("f.bin", 4),
+            &b"test"[..],
+            &AtomicBool::new(false),
+        )
+        .unwrap();
 
         assert!(read_pv(&mut Cursor::new(&buf), &k2).is_err());
     }
@@ -256,7 +298,14 @@ mod tests {
     fn tampered_chunk_fails() {
         let key = generate_vault_key();
         let mut buf = Vec::new();
-        write_pv(&mut buf, &key, &meta("f.bin", 5), &b"hello"[..], &AtomicBool::new(false)).unwrap();
+        write_pv(
+            &mut buf,
+            &key,
+            &meta("f.bin", 5),
+            &b"hello"[..],
+            &AtomicBool::new(false),
+        )
+        .unwrap();
 
         // Flip a byte near the end (inside encrypted chunk)
         let last = buf.len() - 1;
@@ -294,11 +343,23 @@ mod tests {
         let key = generate_vault_key();
         // Several chunks' worth — large enough that buffering it all at once
         // (the old behavior) vs. reading it in CHUNK_SIZE pieces would differ.
-        let data: Vec<u8> = (0..(CHUNK_SIZE * 4 + 12345)).map(|i| (i % 251) as u8).collect();
-        let reader = BoundedReader { data: &data, pos: 0 };
+        let data: Vec<u8> = (0..(CHUNK_SIZE * 4 + 12345))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let reader = BoundedReader {
+            data: &data,
+            pos: 0,
+        };
 
         let mut buf = Vec::new();
-        write_pv(&mut buf, &key, &meta("big.bin", data.len() as u64), reader, &AtomicBool::new(false)).unwrap();
+        write_pv(
+            &mut buf,
+            &key,
+            &meta("big.bin", data.len() as u64),
+            reader,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
 
         let (m, out) = read_pv(&mut Cursor::new(&buf), &key).unwrap();
         assert_eq!(out, data);
@@ -312,8 +373,14 @@ mod tests {
         let cancel = AtomicBool::new(true);
 
         let mut buf = Vec::new();
-        let err = write_pv(&mut buf, &key, &meta("f.bin", data.len() as u64), data.as_slice(), &cancel)
-            .unwrap_err();
+        let err = write_pv(
+            &mut buf,
+            &key,
+            &meta("f.bin", data.len() as u64),
+            data.as_slice(),
+            &cancel,
+        )
+        .unwrap_err();
         assert!(matches!(err, VaultError::Cancelled));
     }
 
@@ -322,8 +389,14 @@ mod tests {
         let key = generate_vault_key();
         let data = vec![0xCDu8; CHUNK_SIZE * 4];
         let mut buf = Vec::new();
-        write_pv(&mut buf, &key, &meta("f.bin", data.len() as u64), data.as_slice(), &AtomicBool::new(false))
-            .unwrap();
+        write_pv(
+            &mut buf,
+            &key,
+            &meta("f.bin", data.len() as u64),
+            data.as_slice(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
 
         let mut reader = Cursor::new(&buf);
         let _metadata = read_pv_metadata(&mut reader, &key).unwrap();
