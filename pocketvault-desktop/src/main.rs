@@ -64,8 +64,9 @@ fn subscription(app: &PocketVault) -> Subscription<Message> {
     // Periodic redraw while any job is running, so the ETA/progress text
     // (read straight from a shared `JobControl` on each render — see
     // `state::RunningEncryptJob`) keeps visibly counting down.
-    let any_job_running =
-        app.running_encrypt.is_some() || app.active_delete_job.is_some() || app.active_export_job.is_some();
+    let any_job_running = app.running_encrypt.is_some()
+        || app.active_delete_job.is_some()
+        || app.active_export_job.is_some();
     if any_job_running {
         subs.push(iced::time::every(std::time::Duration::from_millis(300)).map(|_| Message::Tick));
     }

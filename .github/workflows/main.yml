@@ -1,13 +1,15 @@
 name: Main
 
 # Gatekeeper for `main`:
-#   - `ci` runs the cargo lifecycle (clippy, build, test) on every push to
-#     main and every PR targeting main. Pair this with a branch protection
-#     rule on `main` requiring the "cargo checks" job to pass before merge —
-#     this file only defines the check, it can't enforce that by itself.
+#   - `fmt` / `clippy` / `build` / `test` run independently (in parallel) on
+#     every push to main and every PR targeting main — each shows up as its
+#     own check, so a failure tells you exactly which stage broke without
+#     opening logs. Pair this with a branch protection rule on `main`
+#     requiring these checks to pass before merge — this file only defines
+#     the checks, it can't enforce that by itself.
 #   - `revert-on-failure` only runs for direct pushes to main (not PRs). If
-#     `ci` fails, it reverts the breaking commit and pushes the revert
-#     straight to main so main stays green.
+#     any of the four checks fail, it reverts the breaking commit and pushes
+#     the revert straight to main so main stays green.
 #
 # IMPORTANT: `revert-on-failure` pushes directly to `main`. If branch
 # protection blocks direct pushes for everyone (recommended — see the repo
@@ -30,8 +32,26 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  ci:
-    name: cargo checks
+  fmt:
+    name: fmt
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
     runs-on: windows-latest
     steps:
       - name: Check out repository
@@ -48,15 +68,41 @@ jobs:
       - name: Clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  build:
+    name: build
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+
       - name: Build
         run: cargo build --workspace
+
+  test:
+    name: test
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
 
       - name: Test
         run: cargo test --workspace
 
   revert-on-failure:
     name: Revert breaking push to main
-    needs: ci
+    needs: [fmt, clippy, build, test]
     if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:

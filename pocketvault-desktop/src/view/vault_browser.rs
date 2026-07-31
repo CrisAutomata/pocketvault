@@ -5,7 +5,9 @@ use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Element, Length};
 
 use crate::message::Message;
-use crate::state::{eta_label, CancelTarget, FileItem, FolderItem, FolderTreeRow, PocketVault, Session};
+use crate::state::{
+    eta_label, CancelTarget, FileItem, FolderItem, FolderTreeRow, PocketVault, Session,
+};
 use crate::theme;
 use pocketvault_core::is_previewable;
 
@@ -145,10 +147,13 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
     // ── Toolbar ──────────────────────────────────────────────────────
     let toolbar = container(
         row![
-            row![text("🔒").size(16), text("Vault").size(16).color(theme::text())]
-                .spacing(6)
-                .align_y(Vertical::Center)
-                .width(Length::Fixed(200.0)),
+            row![
+                text("🔒").size(16),
+                text("Vault").size(16).color(theme::text())
+            ]
+            .spacing(6)
+            .align_y(Vertical::Center)
+            .width(Length::Fixed(200.0)),
             row![
                 button(row![text("+").size(16), text("Encrypt Files").size(12)].spacing(4))
                     .padding([6, 12])
@@ -299,16 +304,12 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
 
     if !folders.is_empty() {
         list = list.push(
-            container(
-                text("FOLDERS")
-                    .size(10)
-                    .color(theme::section_header()),
-            )
-            .padding([0, 16])
-            .align_y(Vertical::Center)
-            .height(Length::Fixed(24.0))
-            .width(Length::Fill)
-            .style(theme::container_with_bg(theme::folder_band_bg())),
+            container(text("FOLDERS").size(10).color(theme::section_header()))
+                .padding([0, 16])
+                .align_y(Vertical::Center)
+                .height(Length::Fixed(24.0))
+                .width(Length::Fill)
+                .style(theme::container_with_bg(theme::folder_band_bg())),
         );
         for f in &folders {
             let selected = app.selected_id == f.id;
@@ -375,7 +376,11 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
         let status = if job.cancelling {
             "Cancelling…".to_string()
         } else {
-            format!("Encrypting {} — {}", job.label, eta_label(&job.control, job.total_bytes, job.started_at))
+            format!(
+                "Encrypting {} — {}",
+                job.label,
+                eta_label(&job.control, job.total_bytes, job.started_at)
+            )
         };
         let cancel = (!job.cancelling).then_some(Message::RequestCancelJob(CancelTarget::Encrypt));
         banner_lines.push(banner_line(status, cancel));
@@ -404,16 +409,18 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
     let mut layout = column![toolbar, divider()];
 
     if !banner_lines.is_empty() {
-        let banner = container(
-            column(banner_lines).spacing(4).padding([8, 16]),
-        )
-        .width(Length::Fill)
-        .style(theme::container_with_bg(theme::folder_band_bg()));
+        let banner = container(column(banner_lines).spacing(4).padding([8, 16]))
+            .width(Length::Fill)
+            .style(theme::container_with_bg(theme::folder_band_bg()));
         layout = layout.push(banner).push(divider());
     }
 
     layout
-        .push(row![sidebar, vdivider(), content].width(Length::Fill).height(Length::Fill))
+        .push(
+            row![sidebar, vdivider(), content]
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
         .push(divider())
         .push(path_bar)
         .width(Length::Fill)

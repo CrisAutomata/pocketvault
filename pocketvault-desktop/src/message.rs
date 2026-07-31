@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
+use crate::state::CancelTarget;
 use iced::window;
 use pocketvault_core::Vault;
-use crate::state::CancelTarget;
 
 #[derive(Debug, Clone)]
 pub enum Message {

@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use pocketvault_core::{
-    crypto::{decrypt, encrypt, generate_vault_key, KdfParams, derive_key},
+    crypto::{decrypt, derive_key, encrypt, generate_vault_key, KdfParams},
     pv_format::{read_pv, write_pv, JobControl, PvMetadata},
 };
 use std::io::Cursor;
@@ -45,13 +45,27 @@ fn bench_pv_file(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("write", size), &size, |b, _| {
             b.iter(|| {
                 let mut buf = Vec::with_capacity(size + 512);
-                write_pv(&mut buf, &key, &meta, data.as_slice(), &JobControl::default()).unwrap();
+                write_pv(
+                    &mut buf,
+                    &key,
+                    &meta,
+                    data.as_slice(),
+                    &JobControl::default(),
+                )
+                .unwrap();
                 buf
             });
         });
 
         let mut pv_buf = Vec::new();
-        write_pv(&mut pv_buf, &key, &meta, data.as_slice(), &JobControl::default()).unwrap();
+        write_pv(
+            &mut pv_buf,
+            &key,
+            &meta,
+            data.as_slice(),
+            &JobControl::default(),
+        )
+        .unwrap();
         group.bench_with_input(BenchmarkId::new("read", size), &size, |b, _| {
             b.iter(|| read_pv(&mut Cursor::new(&pv_buf), &key).unwrap());
         });
@@ -63,7 +77,12 @@ fn bench_pv_file(c: &mut Criterion) {
 
 fn bench_argon2id(c: &mut Criterion) {
     // Production-cost params: m=64MB, t=3, p=1
-    let params = KdfParams { salt: vec![42u8; 32], m_cost: 65536, t_cost: 3, p_cost: 1 };
+    let params = KdfParams {
+        salt: vec![42u8; 32],
+        m_cost: 65536,
+        t_cost: 3,
+        p_cost: 1,
+    };
     c.bench_function("argon2id_production_params", |b| {
         b.iter(|| derive_key("benchmark_password_123!", &params).unwrap());
     });

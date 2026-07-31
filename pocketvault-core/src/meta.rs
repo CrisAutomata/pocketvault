@@ -2,9 +2,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::crypto::{
-    decrypt, derive_key, encrypt, generate_vault_key, KdfParams, VaultKey,
-};
+use crate::crypto::{decrypt, derive_key, encrypt, generate_vault_key, KdfParams, VaultKey};
 use crate::error::{Result, VaultError};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,7 +65,8 @@ impl VaultMeta {
     }
 
     pub fn unlock(&self, password: &str) -> Result<VaultKey> {
-        let salt = B64.decode(&self.argon2.salt_b64)
+        let salt = B64
+            .decode(&self.argon2.salt_b64)
             .map_err(|e| VaultError::Base64Error(e.to_string()))?;
 
         let kek = derive_key(
@@ -80,10 +79,12 @@ impl VaultMeta {
             },
         )?;
 
-        let enc_dek = B64.decode(&self.enc_vault_key_b64)
+        let enc_dek = B64
+            .decode(&self.enc_vault_key_b64)
             .map_err(|e| VaultError::Base64Error(e.to_string()))?;
 
-        let nonce_bytes = B64.decode(&self.vault_key_nonce_b64)
+        let nonce_bytes = B64
+            .decode(&self.vault_key_nonce_b64)
             .map_err(|e| VaultError::Base64Error(e.to_string()))?;
         let mut nonce = [0u8; 12];
         if nonce_bytes.len() != 12 {

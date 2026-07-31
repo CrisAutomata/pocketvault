@@ -7,14 +7,10 @@ use crate::state::{FileItem, FolderItem, FolderTreeRow};
 use crate::theme;
 
 pub fn badge<'a>(count: i64) -> Element<'a, Message> {
-    container(
-        text(count.to_string())
-            .size(11)
-            .color(theme::badge_text()),
-    )
-    .padding([2, 8])
-    .style(theme::container_with_bg(theme::badge_bg()))
-    .into()
+    container(text(count.to_string()).size(11).color(theme::badge_text()))
+        .padding([2, 8])
+        .style(theme::container_with_bg(theme::badge_bg()))
+        .into()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -72,7 +68,11 @@ pub fn sidebar_item<'a>(
 
 /// A row in the sidebar's expandable folder tree (VS Code Explorer style):
 /// indented by depth, with a chevron toggle only on rows that have children.
-pub fn folder_tree_row<'a>(item: &FolderTreeRow, selected: bool, expanded: bool) -> Element<'a, Message> {
+pub fn folder_tree_row<'a>(
+    item: &FolderTreeRow,
+    selected: bool,
+    expanded: bool,
+) -> Element<'a, Message> {
     let folder_id = item.id.clone();
     let folder_id_for_toggle = item.id.clone();
     let name = item.name.clone();
@@ -109,7 +109,11 @@ pub fn folder_tree_row<'a>(item: &FolderTreeRow, selected: bool, expanded: bool)
 
 /// `mutations_allowed` gates Rename/Delete only — Export never mutates the
 /// vault (no `save()` call), so it stays live regardless of any running job.
-pub fn folder_row<'a>(item: &FolderItem, selected: bool, mutations_allowed: bool) -> Element<'a, Message> {
+pub fn folder_row<'a>(
+    item: &FolderItem,
+    selected: bool,
+    mutations_allowed: bool,
+) -> Element<'a, Message> {
     let name = item.name.clone();
     let folder_id = item.id.clone();
     let folder_id_for_export = item.id.clone();
@@ -148,7 +152,9 @@ pub fn folder_row<'a>(item: &FolderItem, selected: bool, mutations_allowed: bool
             button(text("Delete").size(11))
                 .padding([4, 8])
                 .style(|_theme, status| theme::danger_button(status))
-                .on_press_maybe(mutations_allowed.then_some(Message::RequestDeleteFolder(folder_id_for_delete))),
+                .on_press_maybe(
+                    mutations_allowed.then_some(Message::RequestDeleteFolder(folder_id_for_delete))
+                ),
         ]
         .spacing(4)
         .width(Length::Fixed(180.0)),
@@ -168,7 +174,11 @@ pub fn folder_row<'a>(item: &FolderItem, selected: bool, mutations_allowed: bool
 
 /// `mutations_allowed` gates Delete only — Preview/Export never mutate the
 /// vault, so they stay live regardless of any running job.
-pub fn file_row<'a>(item: &FileItem, selected: bool, mutations_allowed: bool) -> Element<'a, Message> {
+pub fn file_row<'a>(
+    item: &FileItem,
+    selected: bool,
+    mutations_allowed: bool,
+) -> Element<'a, Message> {
     let display_name = item.display_name.clone();
     let modified = item.modified_str.clone();
     let size = item.size_str.clone();
@@ -201,7 +211,9 @@ pub fn file_row<'a>(item: &FileItem, selected: bool, mutations_allowed: bool) ->
         button(text("Delete").size(11))
             .padding([4, 8])
             .style(|_theme, status| theme::danger_button(status))
-            .on_press_maybe(mutations_allowed.then_some(Message::RequestDeleteFile(file_id_for_delete))),
+            .on_press_maybe(
+                mutations_allowed.then_some(Message::RequestDeleteFile(file_id_for_delete)),
+            ),
     );
 
     let content = row![

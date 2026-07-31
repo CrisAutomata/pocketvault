@@ -29,7 +29,12 @@ pub fn build_meta_cache(vault: &Vault, key: &VaultKey) -> HashMap<String, PvMeta
         .meta
         .files
         .iter()
-        .filter_map(|f| vault.read_metadata(&f.id, key).ok().map(|m| (f.id.clone(), m)))
+        .filter_map(|f| {
+            vault
+                .read_metadata(&f.id, key)
+                .ok()
+                .map(|m| (f.id.clone(), m))
+        })
         .collect()
 }
 
@@ -42,7 +47,13 @@ pub fn vault_folder_total_size(session: &Session, folder_id: &str) -> u64 {
         .vault
         .files_in_folder(Some(folder_id))
         .iter()
-        .map(|f| session.meta_cache.get(&f.id).map(|m| m.original_size).unwrap_or(0))
+        .map(|f| {
+            session
+                .meta_cache
+                .get(&f.id)
+                .map(|m| m.original_size)
+                .unwrap_or(0)
+        })
         .sum();
     for sub in session.vault.folders(Some(folder_id)) {
         total += vault_folder_total_size(session, &sub.id);
@@ -53,8 +64,14 @@ pub fn vault_folder_total_size(session: &Session, folder_id: &str) -> u64 {
 /// What an encrypt job needs in order to actually start once it's its turn —
 /// stashed in `QueuedEncryptJob` for jobs still waiting behind another.
 pub enum EncryptJobInput {
-    Files { paths: Vec<PathBuf>, dest_folder_id: Option<String> },
-    Folder { path: PathBuf, dest_folder_id: Option<String> },
+    Files {
+        paths: Vec<PathBuf>,
+        dest_folder_id: Option<String>,
+    },
+    Folder {
+        path: PathBuf,
+        dest_folder_id: Option<String>,
+    },
 }
 
 /// An encrypt job that's been accepted but hasn't started yet because one is
@@ -238,7 +255,9 @@ pub fn vault_total_size(session: &Session) -> u64 {
 /// bytes processed so far vs. elapsed time — "Estimating…" until at least one
 /// chunk has landed, since a rate can't be known yet.
 pub fn eta_label(control: &JobControl, total_bytes: u64, started_at: Instant) -> String {
-    let done = control.bytes_done.load(std::sync::atomic::Ordering::Relaxed);
+    let done = control
+        .bytes_done
+        .load(std::sync::atomic::Ordering::Relaxed);
     if done == 0 || total_bytes == 0 {
         return "Estimating…".to_string();
     }

@@ -46,13 +46,9 @@ pub fn view(id: window::Id, data: &PreviewData) -> Element<'_, Message> {
         }
     } else {
         scrollable(
-            container(
-                text(data.text.clone())
-                    .size(13)
-                    .color(theme::text()),
-            )
-            .padding(20)
-            .width(Length::Fill),
+            container(text(data.text.clone()).size(13).color(theme::text()))
+                .padding(20)
+                .width(Length::Fill),
         )
         .width(Length::Fill)
         .height(Length::Fill)

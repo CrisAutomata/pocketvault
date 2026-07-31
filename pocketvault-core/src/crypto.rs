@@ -90,7 +90,12 @@ mod tests {
 
     #[test]
     fn derive_key_is_deterministic() {
-        let params = KdfParams { salt: vec![1u8; 32], m_cost: 4096, t_cost: 1, p_cost: 1 };
+        let params = KdfParams {
+            salt: vec![1u8; 32],
+            m_cost: 4096,
+            t_cost: 1,
+            p_cost: 1,
+        };
         let k1 = derive_key("password", &params).unwrap();
         let k2 = derive_key("password", &params).unwrap();
         assert_eq!(k1.0, k2.0);
@@ -98,7 +103,12 @@ mod tests {
 
     #[test]
     fn different_passwords_produce_different_keys() {
-        let params = KdfParams { salt: vec![1u8; 32], m_cost: 4096, t_cost: 1, p_cost: 1 };
+        let params = KdfParams {
+            salt: vec![1u8; 32],
+            m_cost: 4096,
+            t_cost: 1,
+            p_cost: 1,
+        };
         let k1 = derive_key("password1", &params).unwrap();
         let k2 = derive_key("password2", &params).unwrap();
         assert_ne!(k1.0, k2.0);
@@ -106,8 +116,18 @@ mod tests {
 
     #[test]
     fn different_salts_produce_different_keys() {
-        let p1 = KdfParams { salt: vec![1u8; 32], m_cost: 4096, t_cost: 1, p_cost: 1 };
-        let p2 = KdfParams { salt: vec![2u8; 32], m_cost: 4096, t_cost: 1, p_cost: 1 };
+        let p1 = KdfParams {
+            salt: vec![1u8; 32],
+            m_cost: 4096,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        let p2 = KdfParams {
+            salt: vec![2u8; 32],
+            m_cost: 4096,
+            t_cost: 1,
+            p_cost: 1,
+        };
         let k1 = derive_key("password", &p1).unwrap();
         let k2 = derive_key("password", &p2).unwrap();
         assert_ne!(k1.0, k2.0);

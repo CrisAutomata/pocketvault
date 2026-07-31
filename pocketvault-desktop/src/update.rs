@@ -107,7 +107,9 @@ pub fn update(app: &mut PocketVault, message: Message) -> Task<Message> {
             .then(|dialog| {
                 Task::perform(dialog.pick_files(), |result| {
                     Message::FilesPicked(
-                        result.map(|handles| handles.iter().map(|h| h.path().to_path_buf()).collect()),
+                        result.map(|handles| {
+                            handles.iter().map(|h| h.path().to_path_buf()).collect()
+                        }),
                     )
                 })
             })
@@ -138,7 +140,9 @@ pub fn update(app: &mut PocketVault, message: Message) -> Task<Message> {
             }
             window::run(app.main_window, |w| {
                 let handle = w.window_handle().expect("window handle");
-                AsyncFileDialog::new().set_title("Choose export folder").set_parent(&handle)
+                AsyncFileDialog::new()
+                    .set_title("Choose export folder")
+                    .set_parent(&handle)
             })
             .then(move |dialog| {
                 let file_id = file_id.clone();
@@ -155,23 +159,32 @@ pub fn update(app: &mut PocketVault, message: Message) -> Task<Message> {
             }
             window::run(app.main_window, |w| {
                 let handle = w.window_handle().expect("window handle");
-                AsyncFileDialog::new().set_title("Choose export destination").set_parent(&handle)
+                AsyncFileDialog::new()
+                    .set_title("Choose export destination")
+                    .set_parent(&handle)
             })
             .then(move |dialog| {
                 let folder_id = folder_id.clone();
                 Task::perform(dialog.pick_folder(), move |result| {
-                    Message::ExportFolderDestPicked(folder_id.clone(), result.map(|h| h.path().to_path_buf()))
+                    Message::ExportFolderDestPicked(
+                        folder_id.clone(),
+                        result.map(|h| h.path().to_path_buf()),
+                    )
                 })
             })
         }
-        Message::ExportFolderDestPicked(folder_id, dest_dir) => start_export_folder(app, &folder_id, dest_dir),
+        Message::ExportFolderDestPicked(folder_id, dest_dir) => {
+            start_export_folder(app, &folder_id, dest_dir)
+        }
 
         Message::PreviewFile(file_id) => preview_file(app, &file_id),
         Message::DialogDismissed => Task::none(),
 
         Message::OpenNewFolderDialog => {
             if !app.exclusive_slot_busy() {
-                app.modal = Some(Modal::NewFolder { name: String::new() });
+                app.modal = Some(Modal::NewFolder {
+                    name: String::new(),
+                });
             }
             Task::none()
         }
@@ -324,7 +337,11 @@ pub fn update(app: &mut PocketVault, message: Message) -> Task<Message> {
                             session.meta_cache.remove(&id);
                         }
                     }
-                    if let Some(RunningDeleteJob { target_folder_id: Some(fid), .. }) = &job {
+                    if let Some(RunningDeleteJob {
+                        target_folder_id: Some(fid),
+                        ..
+                    }) = &job
+                    {
                         if app.current_folder_id.as_deref() == Some(fid.as_str()) {
                             app.current_folder_id = None;
                         }
@@ -343,7 +360,10 @@ pub fn update(app: &mut PocketVault, message: Message) -> Task<Message> {
             app.active_export_job = None;
             let (title, description) = match outcome {
                 None => return Task::none(),
-                Some(Ok(path)) => ("Exported".to_string(), format!("Saved to:\n{}", path.display())),
+                Some(Ok(path)) => (
+                    "Exported".to_string(),
+                    format!("Saved to:\n{}", path.display()),
+                ),
                 Some(Err(e)) => ("Export Failed".to_string(), e),
             };
             completion_dialog(app.main_window, title, description)
@@ -526,7 +546,13 @@ fn try_start_next_encrypt(app: &mut PocketVault) -> Task<Message> {
     let Some(queued) = app.encrypt_queue.pop_front() else {
         return Task::none();
     };
-    start_running_encrypt(app, queued.id, queued.label, queued.input, queued.total_bytes)
+    start_running_encrypt(
+        app,
+        queued.id,
+        queued.label,
+        queued.input,
+        queued.total_bytes,
+    )
 }
 
 fn start_running_encrypt(
@@ -557,10 +583,16 @@ fn start_running_encrypt(
     std::thread::spawn(move || {
         let mut vault = vault;
         let result = match input {
-            EncryptJobInput::Files { paths, dest_folder_id } => vault
+            EncryptJobInput::Files {
+                paths,
+                dest_folder_id,
+            } => vault
                 .encrypt_files(&paths, dest_folder_id.as_deref(), &key, &control)
                 .map_err(|e| e.to_string()),
-            EncryptJobInput::Folder { path, dest_folder_id } => vault
+            EncryptJobInput::Folder {
+                path,
+                dest_folder_id,
+            } => vault
                 .encrypt_folder(&path, dest_folder_id.as_deref(), &key, &control)
                 .map_err(|e| e.to_string()),
         };
@@ -572,7 +604,12 @@ fn start_running_encrypt(
 
 /// Starts the job now if nothing's running, queues it if something already
 /// is (or shows a "queue full" message past `MAX_QUEUE_TOTAL`).
-fn enqueue_or_start_encrypt(app: &mut PocketVault, label: String, input: EncryptJobInput, total_bytes: u64) -> Task<Message> {
+fn enqueue_or_start_encrypt(
+    app: &mut PocketVault,
+    label: String,
+    input: EncryptJobInput,
+    total_bytes: u64,
+) -> Task<Message> {
     if app.running_encrypt.is_none() {
         let id = app.next_job_id;
         app.next_job_id += 1;
@@ -585,7 +622,12 @@ fn enqueue_or_start_encrypt(app: &mut PocketVault, label: String, input: Encrypt
 
     let id = app.next_job_id;
     app.next_job_id += 1;
-    app.encrypt_queue.push_back(QueuedEncryptJob { id, label, input, total_bytes });
+    app.encrypt_queue.push_back(QueuedEncryptJob {
+        id,
+        label,
+        input,
+        total_bytes,
+    });
     Task::none()
 }
 
@@ -598,11 +640,20 @@ fn start_encrypt_files(app: &mut PocketVault, paths_opt: Option<Vec<PathBuf>>) -
         return Task::none();
     }
     let dest_folder_id = app.current_folder_id.clone();
-    let total: u64 = paths.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+    let total: u64 = paths
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum();
 
     if total < BIG_JOB_THRESHOLD_BYTES {
         let session = app.session.as_mut().unwrap();
-        match session.vault.encrypt_files(&paths, dest_folder_id.as_deref(), &session.key, &JobControl::default()) {
+        match session.vault.encrypt_files(
+            &paths,
+            dest_folder_id.as_deref(),
+            &session.key,
+            &JobControl::default(),
+        ) {
             Ok(ids) => {
                 for id in ids {
                     if let Ok(meta) = session.vault.read_metadata(&id, &session.key) {
@@ -616,11 +667,22 @@ fn start_encrypt_files(app: &mut PocketVault, paths_opt: Option<Vec<PathBuf>>) -
     }
 
     let label = if paths.len() == 1 {
-        paths[0].file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into())
+        paths[0]
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".into())
     } else {
         format!("{} files", paths.len())
     };
-    enqueue_or_start_encrypt(app, label, EncryptJobInput::Files { paths, dest_folder_id }, total)
+    enqueue_or_start_encrypt(
+        app,
+        label,
+        EncryptJobInput::Files {
+            paths,
+            dest_folder_id,
+        },
+        total,
+    )
 }
 
 fn start_encrypt_folder(app: &mut PocketVault, path_opt: Option<PathBuf>) -> Task<Message> {
@@ -636,7 +698,12 @@ fn start_encrypt_folder(app: &mut PocketVault, path_opt: Option<PathBuf>) -> Tas
 
     if total < BIG_JOB_THRESHOLD_BYTES {
         let session = app.session.as_mut().unwrap();
-        match session.vault.encrypt_folder(&path, dest_folder_id.as_deref(), &session.key, &JobControl::default()) {
+        match session.vault.encrypt_folder(
+            &path,
+            dest_folder_id.as_deref(),
+            &session.key,
+            &JobControl::default(),
+        ) {
             Ok(ids) => {
                 for id in ids {
                     if let Ok(meta) = session.vault.read_metadata(&id, &session.key) {
@@ -649,11 +716,26 @@ fn start_encrypt_folder(app: &mut PocketVault, path_opt: Option<PathBuf>) -> Tas
         return Task::none();
     }
 
-    let label = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "folder".into());
-    enqueue_or_start_encrypt(app, label, EncryptJobInput::Folder { path, dest_folder_id }, total)
+    let label = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "folder".into());
+    enqueue_or_start_encrypt(
+        app,
+        label,
+        EncryptJobInput::Folder {
+            path,
+            dest_folder_id,
+        },
+        total,
+    )
 }
 
-fn start_export_file(app: &mut PocketVault, file_id: &str, dest_dir: Option<PathBuf>) -> Task<Message> {
+fn start_export_file(
+    app: &mut PocketVault,
+    file_id: &str,
+    dest_dir: Option<PathBuf>,
+) -> Task<Message> {
     let dest_dir = match dest_dir {
         Some(d) => d,
         None => return Task::none(),
@@ -665,7 +747,11 @@ fn start_export_file(app: &mut PocketVault, file_id: &str, dest_dir: Option<Path
         Some(s) => s,
         None => return Task::none(),
     };
-    let size = session.meta_cache.get(file_id).map(|m| m.original_size).unwrap_or(0);
+    let size = session
+        .meta_cache
+        .get(file_id)
+        .map(|m| m.original_size)
+        .unwrap_or(0);
     let name = session
         .meta_cache
         .get(file_id)
@@ -673,8 +759,16 @@ fn start_export_file(app: &mut PocketVault, file_id: &str, dest_dir: Option<Path
         .unwrap_or_else(|| "file".to_string());
 
     if size < BIG_JOB_THRESHOLD_BYTES {
-        let (title, description) = match session.vault.export_file(file_id, &dest_dir, &session.key, &JobControl::default()) {
-            Ok(path) => ("Exported".to_string(), format!("Saved to:\n{}", path.display())),
+        let (title, description) = match session.vault.export_file(
+            file_id,
+            &dest_dir,
+            &session.key,
+            &JobControl::default(),
+        ) {
+            Ok(path) => (
+                "Exported".to_string(),
+                format!("Saved to:\n{}", path.display()),
+            ),
             Err(e) => ("Export Failed".to_string(), e.to_string()),
         };
         return completion_dialog(app.main_window, title, description);
@@ -683,18 +777,28 @@ fn start_export_file(app: &mut PocketVault, file_id: &str, dest_dir: Option<Path
     let vault = session.vault.clone();
     let key = session.key.clone();
     let control = Arc::new(JobControl::default());
-    app.active_export_job = Some(RunningExportJob { label: name, control: control.clone(), cancelling: false });
+    app.active_export_job = Some(RunningExportJob {
+        label: name,
+        control: control.clone(),
+        cancelling: false,
+    });
 
     let file_id = file_id.to_string();
     let (tx, rx) = iced::futures::channel::oneshot::channel();
     std::thread::spawn(move || {
-        let result = vault.export_file(&file_id, &dest_dir, &key, &control).map_err(|e| e.to_string());
+        let result = vault
+            .export_file(&file_id, &dest_dir, &key, &control)
+            .map_err(|e| e.to_string());
         let _ = tx.send(result);
     });
     Task::perform(async move { rx.await.ok() }, Message::ExportJobFinished)
 }
 
-fn start_export_folder(app: &mut PocketVault, folder_id: &str, dest_dir: Option<PathBuf>) -> Task<Message> {
+fn start_export_folder(
+    app: &mut PocketVault,
+    folder_id: &str,
+    dest_dir: Option<PathBuf>,
+) -> Task<Message> {
     let dest_dir = match dest_dir {
         Some(d) => d,
         None => return Task::none(),
@@ -716,8 +820,16 @@ fn start_export_folder(app: &mut PocketVault, folder_id: &str, dest_dir: Option<
         .unwrap_or_else(|| "folder".to_string());
 
     if total < BIG_JOB_THRESHOLD_BYTES {
-        let (title, description) = match session.vault.export_folder(folder_id, &dest_dir, &session.key, &JobControl::default()) {
-            Ok(path) => ("Exported".to_string(), format!("Saved to:\n{}", path.display())),
+        let (title, description) = match session.vault.export_folder(
+            folder_id,
+            &dest_dir,
+            &session.key,
+            &JobControl::default(),
+        ) {
+            Ok(path) => (
+                "Exported".to_string(),
+                format!("Saved to:\n{}", path.display()),
+            ),
             Err(e) => ("Export Failed".to_string(), e.to_string()),
         };
         return completion_dialog(app.main_window, title, description);
@@ -726,12 +838,18 @@ fn start_export_folder(app: &mut PocketVault, folder_id: &str, dest_dir: Option<
     let vault = session.vault.clone();
     let key = session.key.clone();
     let control = Arc::new(JobControl::default());
-    app.active_export_job = Some(RunningExportJob { label: name, control: control.clone(), cancelling: false });
+    app.active_export_job = Some(RunningExportJob {
+        label: name,
+        control: control.clone(),
+        cancelling: false,
+    });
 
     let folder_id = folder_id.to_string();
     let (tx, rx) = iced::futures::channel::oneshot::channel();
     std::thread::spawn(move || {
-        let result = vault.export_folder(&folder_id, &dest_dir, &key, &control).map_err(|e| e.to_string());
+        let result = vault
+            .export_folder(&folder_id, &dest_dir, &key, &control)
+            .map_err(|e| e.to_string());
         let _ = tx.send(result);
     });
     Task::perform(async move { rx.await.ok() }, Message::ExportJobFinished)
@@ -745,7 +863,11 @@ fn start_delete_file(app: &mut PocketVault, file_id: String) -> Task<Message> {
         Some(s) => s,
         None => return Task::none(),
     };
-    let size = session.meta_cache.get(&file_id).map(|m| m.original_size).unwrap_or(0);
+    let size = session
+        .meta_cache
+        .get(&file_id)
+        .map(|m| m.original_size)
+        .unwrap_or(0);
 
     if size < BIG_JOB_THRESHOLD_BYTES {
         if let Err(e) = session.vault.delete_file(&file_id) {
@@ -760,13 +882,19 @@ fn start_delete_file(app: &mut PocketVault, file_id: String) -> Task<Message> {
         .get(&file_id)
         .map(|m| m.original_name.clone())
         .unwrap_or_else(|| "file".to_string());
-    app.active_delete_job = Some(RunningDeleteJob { label, target_folder_id: None });
+    app.active_delete_job = Some(RunningDeleteJob {
+        label,
+        target_folder_id: None,
+    });
 
     let vault = session.vault.clone();
     let (tx, rx) = iced::futures::channel::oneshot::channel();
     std::thread::spawn(move || {
         let mut vault = vault;
-        let result = vault.delete_file(&file_id).map(|()| vec![file_id]).map_err(|e| e.to_string());
+        let result = vault
+            .delete_file(&file_id)
+            .map(|()| vec![file_id])
+            .map_err(|e| e.to_string());
         let _ = tx.send((vault, result));
     });
     Task::perform(async move { rx.await.ok() }, Message::DeleteJobFinished)
@@ -804,7 +932,10 @@ fn start_delete_folder(app: &mut PocketVault, folder_id: String) -> Task<Message
         .find(|f| f.id == folder_id)
         .map(|f| f.name.clone())
         .unwrap_or_else(|| "folder".to_string());
-    app.active_delete_job = Some(RunningDeleteJob { label, target_folder_id: Some(folder_id.clone()) });
+    app.active_delete_job = Some(RunningDeleteJob {
+        label,
+        target_folder_id: Some(folder_id.clone()),
+    });
 
     let vault = session.vault.clone();
     let (tx, rx) = iced::futures::channel::oneshot::channel();
@@ -860,7 +991,10 @@ fn preview_file(app: &mut PocketVault, file_id: &str) -> Task<Message> {
                     (w, h, rgba.into_raw())
                 });
                 if image_rgba.is_none() {
-                    return preview_error_dialog(main_window, "Could not decode image.".to_string());
+                    return preview_error_dialog(
+                        main_window,
+                        "Could not decode image.".to_string(),
+                    );
                 }
                 (true, image_rgba, String::new())
             } else {

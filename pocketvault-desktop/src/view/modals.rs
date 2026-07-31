@@ -10,7 +10,9 @@ pub fn wrap<'a>(base: Element<'a, Message>, app: &'a PocketVault) -> Element<'a,
     let card = match &app.modal {
         None => return base,
         Some(Modal::NewFolder { name }) => new_folder_card(name),
-        Some(Modal::Rename { text: rename_text, .. }) => rename_card(rename_text),
+        Some(Modal::Rename {
+            text: rename_text, ..
+        }) => rename_card(rename_text),
         Some(Modal::DeleteConfirm { file_id, folder_id }) => {
             delete_confirm_card(file_id.is_some(), folder_id.is_some())
         }
@@ -18,11 +20,17 @@ pub fn wrap<'a>(base: Element<'a, Message>, app: &'a PocketVault) -> Element<'a,
             let (verb, label) = match target {
                 CancelTarget::Encrypt => (
                     "encrypting",
-                    app.running_encrypt.as_ref().map(|j| j.label.as_str()).unwrap_or("this job"),
+                    app.running_encrypt
+                        .as_ref()
+                        .map(|j| j.label.as_str())
+                        .unwrap_or("this job"),
                 ),
                 CancelTarget::Export => (
                     "exporting",
-                    app.active_export_job.as_ref().map(|j| j.label.as_str()).unwrap_or("this job"),
+                    app.active_export_job
+                        .as_ref()
+                        .map(|j| j.label.as_str())
+                        .unwrap_or("this job"),
                 ),
             };
             confirm_cancel_job_card(verb, label, *target)
@@ -39,7 +47,10 @@ pub fn wrap<'a>(base: Element<'a, Message>, app: &'a PocketVault) -> Element<'a,
     stack![base, overlay].into()
 }
 
-fn modal_shell<'a>(height: f32, content: iced::widget::Column<'a, Message>) -> Element<'a, Message> {
+fn modal_shell<'a>(
+    height: f32,
+    content: iced::widget::Column<'a, Message>,
+) -> Element<'a, Message> {
     container(content.spacing(12).padding(20))
         .width(Length::Fixed(360.0))
         .height(Length::Fixed(height))
@@ -149,7 +160,11 @@ fn delete_confirm_card<'a>(is_file: bool, is_folder: bool) -> Element<'a, Messag
     )
 }
 
-fn confirm_cancel_job_card<'a>(verb: &str, label: &str, target: CancelTarget) -> Element<'a, Message> {
+fn confirm_cancel_job_card<'a>(
+    verb: &str,
+    label: &str,
+    target: CancelTarget,
+) -> Element<'a, Message> {
     modal_shell(
         170.0,
         column![
