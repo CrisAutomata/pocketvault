@@ -124,10 +124,13 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
     // ── Toolbar ──────────────────────────────────────────────────────
     let toolbar = container(
         row![
-            row![text("🔒").size(16), text("Vault").size(16).color(theme::text())]
-                .spacing(6)
-                .align_y(Vertical::Center)
-                .width(Length::Fixed(200.0)),
+            row![
+                text("🔒").size(16),
+                text("Vault").size(16).color(theme::text())
+            ]
+            .spacing(6)
+            .align_y(Vertical::Center)
+            .width(Length::Fixed(200.0)),
             row![
                 button(row![text("+").size(16), text("Encrypt Files").size(12)].spacing(4))
                     .padding([6, 12])
@@ -278,16 +281,12 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
 
     if !folders.is_empty() {
         list = list.push(
-            container(
-                text("FOLDERS")
-                    .size(10)
-                    .color(theme::section_header()),
-            )
-            .padding([0, 16])
-            .align_y(Vertical::Center)
-            .height(Length::Fixed(24.0))
-            .width(Length::Fill)
-            .style(theme::container_with_bg(theme::folder_band_bg())),
+            container(text("FOLDERS").size(10).color(theme::section_header()))
+                .padding([0, 16])
+                .align_y(Vertical::Center)
+                .height(Length::Fixed(24.0))
+                .width(Length::Fill)
+                .style(theme::container_with_bg(theme::folder_band_bg())),
         );
         for f in &folders {
             let selected = app.selected_id == f.id;
@@ -364,7 +363,11 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
     let mut layout = column![toolbar, divider()];
 
     if let Some(job) = &app.active_job {
-        let status = if job.cancelling { "Cancelling…" } else { job.label.as_str() };
+        let status = if job.cancelling {
+            "Cancelling…"
+        } else {
+            job.label.as_str()
+        };
         let mut banner_row = row![text(format!("⏳ {status}")).size(12).color(theme::text())]
             .spacing(12)
             .padding([8, 16])

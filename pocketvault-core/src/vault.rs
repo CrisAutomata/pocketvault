@@ -8,10 +8,10 @@ use std::{
 use uuid::Uuid;
 
 use crate::{
+    crypto::VaultKey,
     error::{Result, VaultError},
     meta::{VaultFileEntry, VaultFolder, VaultMeta},
     pv_format::{read_pv, read_pv_body, read_pv_metadata, write_pv, PvMetadata},
-    crypto::VaultKey,
 };
 
 #[derive(Debug, Clone)]
@@ -405,7 +405,13 @@ fn now_ts() -> i64 {
 }
 
 pub fn mime_for(name: &str) -> String {
-    match name.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
+    match name
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
         "jpg" | "jpeg" => "image/jpeg",
         "png" => "image/png",
         "gif" => "image/gif",
@@ -470,13 +476,19 @@ mod tests {
     fn create_twice_fails() {
         let d = TempDir::new().unwrap();
         let _ = make_vault(d.path());
-        assert!(matches!(Vault::create(d.path(), "p"), Err(VaultError::VaultAlreadyExists)));
+        assert!(matches!(
+            Vault::create(d.path(), "p"),
+            Err(VaultError::VaultAlreadyExists)
+        ));
     }
 
     #[test]
     fn open_missing_fails() {
         let d = TempDir::new().unwrap();
-        assert!(matches!(Vault::open(d.path()), Err(VaultError::VaultNotFound)));
+        assert!(matches!(
+            Vault::open(d.path()),
+            Err(VaultError::VaultNotFound)
+        ));
     }
 
     // ── Encrypt / export ─────────────────────────────────────────────────
@@ -491,11 +503,15 @@ mod tests {
         let original = b"Hello, PocketVault!";
         let path = write_temp(src.path(), "notes.txt", original);
 
-        let fid = v.encrypt_file(&path, None, &key, &AtomicBool::new(false)).unwrap();
+        let fid = v
+            .encrypt_file(&path, None, &key, &AtomicBool::new(false))
+            .unwrap();
         assert_eq!(v.meta.files.len(), 1);
 
         let export_dir = TempDir::new().unwrap();
-        let out = v.export_file(&fid, export_dir.path(), &key, &AtomicBool::new(false)).unwrap();
+        let out = v
+            .export_file(&fid, export_dir.path(), &key, &AtomicBool::new(false))
+            .unwrap();
         assert_eq!(fs::read(&out).unwrap(), original);
     }
 
@@ -507,7 +523,8 @@ mod tests {
         let src = TempDir::new().unwrap();
         let path = write_temp(src.path(), "secret.txt", b"data");
 
-        v.encrypt_file(&path, None, &key, &AtomicBool::new(false)).unwrap();
+        v.encrypt_file(&path, None, &key, &AtomicBool::new(false))
+            .unwrap();
 
         let pv_name = &v.meta.files[0].pv_filename;
         assert!(pv_name.ends_with(".pv"));
@@ -522,7 +539,9 @@ mod tests {
         let src = TempDir::new().unwrap();
         let path = write_temp(src.path(), "photo.jpg", b"JFIF");
 
-        let fid = v.encrypt_file(&path, None, &key, &AtomicBool::new(false)).unwrap();
+        let fid = v
+            .encrypt_file(&path, None, &key, &AtomicBool::new(false))
+            .unwrap();
         let meta = v.read_metadata(&fid, &key).unwrap();
 
         assert_eq!(meta.original_name, "photo.jpg");
@@ -540,9 +559,13 @@ mod tests {
         let src = TempDir::new().unwrap();
         let path = write_temp(src.path(), "big.bin", &data);
 
-        let fid = v.encrypt_file(&path, None, &key, &AtomicBool::new(false)).unwrap();
+        let fid = v
+            .encrypt_file(&path, None, &key, &AtomicBool::new(false))
+            .unwrap();
         let export = TempDir::new().unwrap();
-        let out = v.export_file(&fid, export.path(), &key, &AtomicBool::new(false)).unwrap();
+        let out = v
+            .export_file(&fid, export.path(), &key, &AtomicBool::new(false))
+            .unwrap();
         assert_eq!(fs::read(&out).unwrap(), data);
     }
 
@@ -553,7 +576,12 @@ mod tests {
         let key = unlock(&v);
         let src = TempDir::new().unwrap();
         let fid = v
-            .encrypt_file(&write_temp(src.path(), "f.txt", b"x"), None, &key, &AtomicBool::new(false))
+            .encrypt_file(
+                &write_temp(src.path(), "f.txt", b"x"),
+                None,
+                &key,
+                &AtomicBool::new(false),
+            )
             .unwrap();
 
         // Create a different vault just to get a different key
@@ -562,7 +590,9 @@ mod tests {
         let bad_key = v2.meta.unlock("other").unwrap();
 
         let export = TempDir::new().unwrap();
-        assert!(v.export_file(&fid, export.path(), &bad_key, &AtomicBool::new(false)).is_err());
+        assert!(v
+            .export_file(&fid, export.path(), &bad_key, &AtomicBool::new(false))
+            .is_err());
     }
 
     // ── Delete ───────────────────────────────────────────────────────────
@@ -574,7 +604,12 @@ mod tests {
         let key = unlock(&v);
         let src = TempDir::new().unwrap();
         let fid = v
-            .encrypt_file(&write_temp(src.path(), "f.txt", b"data"), None, &key, &AtomicBool::new(false))
+            .encrypt_file(
+                &write_temp(src.path(), "f.txt", b"data"),
+                None,
+                &key,
+                &AtomicBool::new(false),
+            )
             .unwrap();
 
         let pv_path = v.vault_dir().join(&v.meta.files[0].pv_filename);
@@ -595,10 +630,20 @@ mod tests {
         let folder_id = v.create_folder("Photos", None).unwrap();
 
         let src = TempDir::new().unwrap();
-        v.encrypt_file(&write_temp(src.path(), "a.jpg", b"img"), Some(&folder_id), &key, &AtomicBool::new(false))
-            .unwrap();
-        v.encrypt_file(&write_temp(src.path(), "b.txt", b"txt"), None, &key, &AtomicBool::new(false))
-            .unwrap();
+        v.encrypt_file(
+            &write_temp(src.path(), "a.jpg", b"img"),
+            Some(&folder_id),
+            &key,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        v.encrypt_file(
+            &write_temp(src.path(), "b.txt", b"txt"),
+            None,
+            &key,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
 
         assert_eq!(v.files_in_folder(Some(&folder_id)).len(), 1);
         assert_eq!(v.files_in_folder(None).len(), 1);
@@ -622,7 +667,9 @@ mod tests {
         fs::write(root.join("top.txt"), b"top").unwrap();
         fs::write(root.join("sub").join("nested.txt"), b"nested").unwrap();
 
-        let ids = v.encrypt_folder(&root, None, &key, &AtomicBool::new(false)).unwrap();
+        let ids = v
+            .encrypt_folder(&root, None, &key, &AtomicBool::new(false))
+            .unwrap();
         assert_eq!(ids.len(), 2); // top.txt + nested.txt, empty_sub contributes none
 
         // "Photos" created as a root vault folder
@@ -667,7 +714,8 @@ mod tests {
         fs::write(root.join("top.txt"), b"top").unwrap();
         fs::write(root.join("sub").join("nested.txt"), b"nested").unwrap();
 
-        v.encrypt_folder(&root, None, &key, &AtomicBool::new(false)).unwrap();
+        v.encrypt_folder(&root, None, &key, &AtomicBool::new(false))
+            .unwrap();
         let photos_id = v.meta.subfolders(None)[0].id.clone();
 
         let export_dir = TempDir::new().unwrap();
@@ -677,7 +725,10 @@ mod tests {
 
         assert_eq!(out_dir, export_dir.path().join("Photos"));
         assert_eq!(fs::read(out_dir.join("top.txt")).unwrap(), b"top");
-        assert_eq!(fs::read(out_dir.join("sub").join("nested.txt")).unwrap(), b"nested");
+        assert_eq!(
+            fs::read(out_dir.join("sub").join("nested.txt")).unwrap(),
+            b"nested"
+        );
         assert!(out_dir.join("empty_sub").is_dir());
     }
 
@@ -701,7 +752,12 @@ mod tests {
         fs::write(deep_dir.join("deep.txt"), b"buried treasure").unwrap();
 
         let ids = v
-            .encrypt_folder(&src.path().join("level1"), None, &key, &AtomicBool::new(false))
+            .encrypt_folder(
+                &src.path().join("level1"),
+                None,
+                &key,
+                &AtomicBool::new(false),
+            )
             .unwrap();
         assert_eq!(ids.len(), 1);
 
@@ -738,7 +794,9 @@ mod tests {
             write_temp(src.path(), "b.txt", b"BBB"),
             write_temp(src.path(), "c.txt", b"CCC"),
         ];
-        let ids = v.encrypt_files(&paths, None, &key, &AtomicBool::new(false)).unwrap();
+        let ids = v
+            .encrypt_files(&paths, None, &key, &AtomicBool::new(false))
+            .unwrap();
 
         assert_eq!(v.meta.files.len(), 3);
         let mut names: Vec<String> = ids
@@ -759,7 +817,9 @@ mod tests {
         let src = TempDir::new().unwrap();
         let path = write_temp(src.path(), "f.txt", b"data");
 
-        let err = v.encrypt_file(&path, None, &key, &AtomicBool::new(true)).unwrap_err();
+        let err = v
+            .encrypt_file(&path, None, &key, &AtomicBool::new(true))
+            .unwrap_err();
         assert!(matches!(err, VaultError::Cancelled));
 
         assert!(v.meta.files.is_empty());
@@ -779,7 +839,9 @@ mod tests {
             src.path().join("missing.txt"), // never written — encrypt_file will fail on this one
         ];
 
-        let err = v.encrypt_files(&paths, None, &key, &AtomicBool::new(false)).unwrap_err();
+        let err = v
+            .encrypt_files(&paths, None, &key, &AtomicBool::new(false))
+            .unwrap_err();
         assert!(matches!(err, VaultError::Io(_)));
 
         // a.txt and b.txt were encrypted successfully before the failure, but
@@ -816,7 +878,12 @@ mod tests {
         let key = unlock(&v);
         let src = TempDir::new().unwrap();
         let fid = v
-            .encrypt_file(&write_temp(src.path(), "f.txt", b"data"), None, &key, &AtomicBool::new(false))
+            .encrypt_file(
+                &write_temp(src.path(), "f.txt", b"data"),
+                None,
+                &key,
+                &AtomicBool::new(false),
+            )
             .unwrap();
 
         let export_dir = TempDir::new().unwrap();
@@ -837,7 +904,8 @@ mod tests {
         let root = src.path().join("Photos");
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("top.txt"), b"top").unwrap();
-        v.encrypt_folder(&root, None, &key, &AtomicBool::new(false)).unwrap();
+        v.encrypt_folder(&root, None, &key, &AtomicBool::new(false))
+            .unwrap();
         let photos_id = v.meta.subfolders(None)[0].id.clone();
 
         let export_dir = TempDir::new().unwrap();

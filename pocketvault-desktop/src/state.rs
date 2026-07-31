@@ -23,7 +23,12 @@ pub fn build_meta_cache(vault: &Vault, key: &VaultKey) -> HashMap<String, PvMeta
         .meta
         .files
         .iter()
-        .filter_map(|f| vault.read_metadata(&f.id, key).ok().map(|m| (f.id.clone(), m)))
+        .filter_map(|f| {
+            vault
+                .read_metadata(&f.id, key)
+                .ok()
+                .map(|m| (f.id.clone(), m))
+        })
         .collect()
 }
 
@@ -36,7 +41,13 @@ pub fn vault_folder_total_size(session: &Session, folder_id: &str) -> u64 {
         .vault
         .files_in_folder(Some(folder_id))
         .iter()
-        .map(|f| session.meta_cache.get(&f.id).map(|m| m.original_size).unwrap_or(0))
+        .map(|f| {
+            session
+                .meta_cache
+                .get(&f.id)
+                .map(|m| m.original_size)
+                .unwrap_or(0)
+        })
         .sum();
     for sub in session.vault.folders(Some(folder_id)) {
         total += vault_folder_total_size(session, &sub.id);
