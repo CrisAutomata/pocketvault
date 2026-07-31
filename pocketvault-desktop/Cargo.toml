@@ -1,0 +1,17 @@
+[package]
+name = "pocketvault-desktop"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "pocketvault"
+path = "src/main.rs"
+
+[dependencies]
+pocketvault-core = { path = "../pocketvault-core" }
+iced = { version = "0.14", features = ["image"] }
+rfd = "0.14"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp"] }
+
+[build-dependencies]
+winres = "0.1"

@@ -1,0 +1,15 @@
+# Build artifacts (CARGO_TARGET_DIR is normally redirected outside the repo,
+# but keep these ignored in case a build ever runs without that override).
+/target
+/target-release
+
+# Local vault data created by running a dev build in place.
+/vault.meta
+/vault/
+/pocketvault-desktop/vault.meta
+/pocketvault-desktop/vault/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.pdb

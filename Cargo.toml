@@ -1,0 +1,11 @@
+[workspace]
+members = [
+    "pocketvault-core",
+    "pocketvault-desktop",
+]
+resolver = "2"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
