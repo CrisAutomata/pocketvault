@@ -4,6 +4,7 @@ use pocketvault_core::{
     pv_format::{read_pv, write_pv, PvMetadata},
 };
 use std::io::Cursor;
+use std::sync::atomic::AtomicBool;
 
 // ── AES-256-GCM ───────────────────────────────────────────────────────────────
 
@@ -45,13 +46,13 @@ fn bench_pv_file(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("write", size), &size, |b, _| {
             b.iter(|| {
                 let mut buf = Vec::with_capacity(size + 512);
-                write_pv(&mut buf, &key, &meta, &data).unwrap();
+                write_pv(&mut buf, &key, &meta, data.as_slice(), &AtomicBool::new(false)).unwrap();
                 buf
             });
         });
 
         let mut pv_buf = Vec::new();
-        write_pv(&mut pv_buf, &key, &meta, &data).unwrap();
+        write_pv(&mut pv_buf, &key, &meta, data.as_slice(), &AtomicBool::new(false)).unwrap();
         group.bench_with_input(BenchmarkId::new("read", size), &size, |b, _| {
             b.iter(|| read_pv(&mut Cursor::new(&pv_buf), &key).unwrap());
         });

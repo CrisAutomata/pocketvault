@@ -14,7 +14,7 @@ pub fn main_window(app: &PocketVault) -> Element<'_, Message> {
         Screen::Auth(auth) => auth::view(auth),
         Screen::Vault => vault_browser::view(app),
     };
-    modals::wrap(base, &app.modal)
+    modals::wrap(base, &app.modal, &app.active_job)
 }
 
 pub fn window_view(app: &PocketVault, id: window::Id) -> Element<'_, Message> {

@@ -37,6 +37,9 @@ pub enum VaultError {
 
     #[error("Base64 error: {0}")]
     Base64Error(String),
+
+    #[error("Operation cancelled")]
+    Cancelled,
 }
 
 pub type Result<T> = std::result::Result<T, VaultError>;

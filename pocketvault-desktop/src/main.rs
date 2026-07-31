@@ -34,9 +34,11 @@ fn boot() -> (PocketVault, Task<Message>) {
         screen: Screen::Auth(AuthState::new(mode)),
         current_folder_id: None,
         selected_id: String::new(),
+        expanded_folders: std::collections::HashSet::new(),
         modal: None,
         previews: HashMap::new(),
         main_window,
+        active_job: None,
     };
 
     (app, open_task.discard())

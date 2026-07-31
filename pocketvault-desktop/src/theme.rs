@@ -171,6 +171,24 @@ pub fn row_button(selected_row: bool) -> impl Fn(&iced::Theme, button::Status) -
     }
 }
 
+/// Small neutral toggle button (folder-tree expand/collapse chevron).
+pub fn chevron_button(status: button::Status) -> button::Style {
+    let bg_color = match status {
+        button::Status::Hovered => Some(hover()),
+        _ => None,
+    };
+    button::Style {
+        background: bg_color.map(Background::Color),
+        text_color: text_secondary(),
+        border: Border {
+            radius: 4.0.into(),
+            ..no_border()
+        },
+        shadow: no_shadow(),
+        snap: false,
+    }
+}
+
 /// Small icon-only button (row delete "✕", modal close "✕").
 pub fn icon_button(status: button::Status) -> button::Style {
     let bg_color = match status {

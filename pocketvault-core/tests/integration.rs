@@ -1,5 +1,6 @@
 use pocketvault_core::{Vault, VaultError};
 use std::fs;
+use std::sync::atomic::AtomicBool;
 use tempfile::TempDir;
 
 // ── Full lifecycle ────────────────────────────────────────────────────────────
@@ -26,8 +27,8 @@ fn full_vault_lifecycle() {
     fs::write(&img_path, img_data).unwrap();
     fs::write(&doc_path, doc_data).unwrap();
 
-    let img_id = vault.encrypt_file(&img_path, Some(&photos), &key).unwrap();
-    let doc_id = vault.encrypt_file(&doc_path, Some(&docs), &key).unwrap();
+    let img_id = vault.encrypt_file(&img_path, Some(&photos), &key, &AtomicBool::new(false)).unwrap();
+    let doc_id = vault.encrypt_file(&doc_path, Some(&docs), &key, &AtomicBool::new(false)).unwrap();
 
     // 3. Verify in-memory state
     assert_eq!(vault.folders(None).len(), 2);
@@ -48,8 +49,8 @@ fn full_vault_lifecycle() {
     let key = vault.meta.unlock("StrongPassw0rd!").unwrap();
     let export = TempDir::new().unwrap();
 
-    let img_out = vault.export_file(&img_id, export.path(), &key).unwrap();
-    let doc_out = vault.export_file(&doc_id, export.path(), &key).unwrap();
+    let img_out = vault.export_file(&img_id, export.path(), &key, &AtomicBool::new(false)).unwrap();
+    let doc_out = vault.export_file(&doc_id, export.path(), &key, &AtomicBool::new(false)).unwrap();
 
     assert_eq!(fs::read(&img_out).unwrap(), img_data);
     assert_eq!(fs::read(&doc_out).unwrap(), doc_data);
@@ -73,7 +74,7 @@ fn password_change_files_survive() {
 
     let path = src.path().join("secret.txt");
     fs::write(&path, b"top secret").unwrap();
-    let fid = vault.encrypt_file(&path, None, &key).unwrap();
+    let fid = vault.encrypt_file(&path, None, &key, &AtomicBool::new(false)).unwrap();
     drop(key);
 
     vault.meta.change_password("old_password", "new_password").unwrap();
@@ -85,7 +86,7 @@ fn password_change_files_survive() {
 
     let new_key = vault.meta.unlock("new_password").unwrap();
     let export = TempDir::new().unwrap();
-    let out = vault.export_file(&fid, export.path(), &new_key).unwrap();
+    let out = vault.export_file(&fid, export.path(), &new_key, &AtomicBool::new(false)).unwrap();
     assert_eq!(fs::read(&out).unwrap(), b"top secret");
 }
 
@@ -120,14 +121,14 @@ fn batch_encrypt_and_export() {
     for (name, content) in files {
         let p = src.path().join(name);
         fs::write(&p, content).unwrap();
-        ids.push(vault.encrypt_file(&p, Some(&folder_id), &key).unwrap());
+        ids.push(vault.encrypt_file(&p, Some(&folder_id), &key, &AtomicBool::new(false)).unwrap());
     }
 
     assert_eq!(vault.files_in_folder(Some(&folder_id)).len(), 3);
 
     let export = TempDir::new().unwrap();
     for (id, (_, expected)) in ids.iter().zip(files) {
-        let out = vault.export_file(id, export.path(), &key).unwrap();
+        let out = vault.export_file(id, export.path(), &key, &AtomicBool::new(false)).unwrap();
         assert_eq!(&fs::read(&out).unwrap(), expected);
     }
 }
@@ -144,7 +145,7 @@ fn delete_removes_pv_from_disk() {
     let p = src.path().join("f.txt");
     fs::write(&p, b"bye").unwrap();
 
-    let fid = vault.encrypt_file(&p, None, &key).unwrap();
+    let fid = vault.encrypt_file(&p, None, &key, &AtomicBool::new(false)).unwrap();
     let pv_path = vault.vault_dir().join(&vault.meta.files[0].pv_filename);
     assert!(pv_path.exists());
 

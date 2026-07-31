@@ -1,26 +1,43 @@
+use std::collections::HashSet;
+
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, stack, text};
 use iced::{Element, Length};
 
 use crate::message::Message;
-use crate::state::{FileItem, FolderItem, PocketVault, Session};
+use crate::state::{FileItem, FolderItem, FolderTreeRow, PocketVault, Session};
 use crate::theme;
 use pocketvault_core::is_previewable;
 
-use super::rows::{file_row, folder_row, section_label, sidebar_item};
+use super::rows::{file_row, folder_row, folder_tree_row, section_label, sidebar_item};
 
-fn sidebar_folders(session: &Session) -> Vec<FolderItem> {
-    session
-        .vault
-        .all_folders()
-        .iter()
-        .filter(|f| f.parent_id.is_none())
-        .map(|f| FolderItem {
-            id: f.id.clone(),
-            name: f.name.clone(),
-            item_count: session.vault.meta.folder_file_count(&f.id),
-        })
-        .collect()
+/// Builds the sidebar's folder tree: root folders, plus their direct children
+/// when expanded. Capped at 2 levels — a depth-1 folder never shows a chevron
+/// or expands further here, even if it has its own subfolders.
+fn folder_tree_rows(session: &Session, expanded: &HashSet<String>) -> Vec<FolderTreeRow> {
+    let mut rows = Vec::new();
+    for root in session.vault.folders(None) {
+        let children = session.vault.folders(Some(&root.id));
+        rows.push(FolderTreeRow {
+            id: root.id.clone(),
+            name: root.name.clone(),
+            item_count: session.vault.meta.folder_file_count(&root.id),
+            depth: 0,
+            has_children: !children.is_empty(),
+        });
+        if expanded.contains(&root.id) {
+            for child in children {
+                rows.push(FolderTreeRow {
+                    id: child.id.clone(),
+                    name: child.name.clone(),
+                    item_count: session.vault.meta.folder_file_count(&child.id),
+                    depth: 1,
+                    has_children: false,
+                });
+            }
+        }
+    }
+    rows
 }
 
 fn content_folders(session: &Session, folder_id: Option<&str>) -> Vec<FolderItem> {
@@ -88,7 +105,7 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
     };
 
     let folder_id = app.current_folder_id.as_deref();
-    let sidebar_top = sidebar_folders(session);
+    let sidebar_tree = folder_tree_rows(session, &app.expanded_folders);
     let folders = content_folders(session, folder_id);
     let files = content_files(session, folder_id);
     let total_items = (folders.len() + files.len()) as i64;
@@ -96,16 +113,13 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
     let current_path = match folder_id {
         None => "PocketVault › Vault".to_string(),
         Some(id) => {
-            let name = session
-                .vault
-                .all_folders()
-                .iter()
-                .find(|f| f.id == id)
-                .map(|f| f.name.as_str())
-                .unwrap_or("Folder");
-            format!("PocketVault › Vault › {name}")
+            let chain = session.vault.meta.folder_path(id);
+            let names: Vec<&str> = chain.iter().map(|f| f.name.as_str()).collect();
+            format!("PocketVault › Vault › {}", names.join(" › "))
         }
     };
+
+    let busy = app.active_job.is_some();
 
     // ── Toolbar ──────────────────────────────────────────────────────
     let toolbar = container(
@@ -115,14 +129,18 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
                 .align_y(Vertical::Center)
                 .width(Length::Fixed(200.0)),
             row![
-                button(row![text("+").size(16), text("Encrypt").size(12)].spacing(4))
+                button(row![text("+").size(16), text("Encrypt Files").size(12)].spacing(4))
                     .padding([6, 12])
                     .style(|_theme, status| theme::primary_button(status))
-                    .on_press(Message::EncryptFilesClicked),
+                    .on_press_maybe((!busy).then_some(Message::EncryptFilesClicked)),
+                button(row![text("📁").size(13), text("Encrypt Folder").size(12)].spacing(4))
+                    .padding([6, 12])
+                    .style(|_theme, status| theme::primary_button(status))
+                    .on_press_maybe((!busy).then_some(Message::EncryptFolderClicked)),
                 button(row![text("📁").size(13), text("New Folder").size(12)].spacing(4))
                     .padding([6, 12])
                     .style(|_theme, status| theme::secondary_button(status))
-                    .on_press(Message::OpenNewFolderDialog),
+                    .on_press_maybe((!busy).then_some(Message::OpenNewFolderDialog)),
             ]
             .spacing(8)
             .width(Length::Fill),
@@ -145,19 +163,12 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
     // ── Sidebar ──────────────────────────────────────────────────────
     let sidebar_list = scrollable(
         column(
-            sidebar_top
+            sidebar_tree
                 .into_iter()
                 .map(|f| {
                     let selected = folder_id == Some(f.id.as_str());
-                    sidebar_item(
-                        f.name,
-                        Some(f.item_count as i64),
-                        selected,
-                        false,
-                        true,
-                        Message::NavigateFolder(Some(f.id.clone())),
-                        Some(Message::RequestDeleteFolder(f.id)),
-                    )
+                    let expanded = app.expanded_folders.contains(&f.id);
+                    folder_tree_row(&f, selected, expanded)
                 })
                 .collect::<Vec<_>>(),
         )
@@ -313,26 +324,70 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
     .style(theme::container_with_bg(theme::content_bg()));
 
     // ── Path bar ─────────────────────────────────────────────────────
+    let total_size_str = crate::state::format_size(crate::state::vault_total_size(session));
     let path_bar = container(
-        row![text("🔒").size(11), text(current_path).size(11).color(theme::text_secondary())]
-            .spacing(6)
-            .padding([0, 16])
-            .align_y(Vertical::Center),
+        row![
+            text("🔒").size(11),
+            text(current_path).size(11).color(theme::text_secondary()),
+            container(column![]).width(Length::Fill),
+            text(format!("Total: {total_size_str}"))
+                .size(11)
+                .color(theme::text_secondary()),
+        ]
+        .spacing(6)
+        .padding([0, 16])
+        .align_y(Vertical::Center),
     )
     .height(Length::Fixed(26.0))
     .width(Length::Fill)
     .style(theme::container_with_bg(theme::path_bar_bg()));
 
-    column![
-        toolbar,
-        divider(),
-        row![sidebar, vdivider(), content]
+    // ── Job banner + busy scrim ────────────────────────────────────────
+    let browser_body: Element<Message> = row![sidebar, vdivider(), content]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
+
+    let browser_body = if app.active_job.is_some() {
+        let scrim = mouse_area(
+            container(column![])
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(theme::scrim_container),
+        )
+        .on_press(Message::Ignore);
+        stack![browser_body, scrim].into()
+    } else {
+        browser_body
+    };
+
+    let mut layout = column![toolbar, divider()];
+
+    if let Some(job) = &app.active_job {
+        let status = if job.cancelling { "Cancelling…" } else { job.label.as_str() };
+        let mut banner_row = row![text(format!("⏳ {status}")).size(12).color(theme::text())]
+            .spacing(12)
+            .padding([8, 16])
+            .align_y(Vertical::Center);
+        if job.cancel.is_some() && !job.cancelling {
+            banner_row = banner_row.push(
+                button(text("Cancel").size(12).color(theme::danger()))
+                    .style(|_theme, status| theme::secondary_button(status))
+                    .padding([4, 10])
+                    .on_press(Message::RequestCancelJob),
+            );
+        }
+        let banner = container(banner_row)
             .width(Length::Fill)
-            .height(Length::Fill),
-        divider(),
-        path_bar,
-    ]
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+            .style(theme::container_with_bg(theme::folder_band_bg()));
+        layout = layout.push(banner).push(divider());
+    }
+
+    layout
+        .push(browser_body)
+        .push(divider())
+        .push(path_bar)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }

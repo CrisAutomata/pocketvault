@@ -3,7 +3,7 @@ use iced::widget::{button, container, row, text};
 use iced::{Alignment, Element, Length};
 
 use crate::message::Message;
-use crate::state::{FileItem, FolderItem};
+use crate::state::{FileItem, FolderItem, FolderTreeRow};
 use crate::theme;
 
 pub fn badge<'a>(count: i64) -> Element<'a, Message> {
@@ -64,9 +64,47 @@ pub fn sidebar_item<'a>(
         .into()
 }
 
+/// A row in the sidebar's expandable folder tree (VS Code Explorer style):
+/// indented by depth, with a chevron toggle only on rows that have children.
+pub fn folder_tree_row<'a>(item: &FolderTreeRow, selected: bool, expanded: bool) -> Element<'a, Message> {
+    let folder_id = item.id.clone();
+    let folder_id_for_toggle = item.id.clone();
+    let name = item.name.clone();
+    let count = item.item_count as i64;
+    let indent = item.depth as f32 * 16.0;
+
+    let mut content = row![iced::widget::Space::new().width(Length::Fixed(indent))]
+        .spacing(6)
+        .align_y(Vertical::Center);
+
+    content = content.push(if item.has_children {
+        let chevron = if expanded { "▾" } else { "▸" };
+        button(text(chevron).size(22).color(theme::text_secondary()))
+            .padding(2)
+            .style(|_theme, status| theme::chevron_button(status))
+            .on_press(Message::ToggleFolderExpanded(folder_id_for_toggle))
+            .into()
+    } else {
+        Element::from(iced::widget::Space::new().width(Length::Fixed(26.0)))
+    });
+
+    content = content
+        .push(text("📁").size(13).color(theme::folder_icon()))
+        .push(text(name).size(13).color(theme::text()).width(Length::Fill))
+        .push(badge(count));
+
+    button(content)
+        .width(Length::Fill)
+        .padding([6, 8])
+        .style(move |_theme, status| theme::row_button(selected)(_theme, status))
+        .on_press(Message::NavigateFolder(Some(folder_id)))
+        .into()
+}
+
 pub fn folder_row<'a>(item: &FolderItem, selected: bool) -> Element<'a, Message> {
     let name = item.name.clone();
     let folder_id = item.id.clone();
+    let folder_id_for_export = item.id.clone();
     let folder_id_for_delete = item.id.clone();
     let folder_id_for_rename = item.id.clone();
     let folder_name_for_rename = item.name.clone();
@@ -88,6 +126,10 @@ pub fn folder_row<'a>(item: &FolderItem, selected: bool) -> Element<'a, Message>
             .color(theme::text_secondary())
             .width(Length::Fixed(70.0)),
         row![
+            button(text("Export").size(11))
+                .padding([4, 8])
+                .style(|_theme, status| theme::secondary_button(status))
+                .on_press(Message::ExportFolder(folder_id_for_export)),
             button(text("Rename").size(11))
                 .padding([4, 8])
                 .style(|_theme, status| theme::secondary_button(status))
@@ -109,7 +151,7 @@ pub fn folder_row<'a>(item: &FolderItem, selected: bool) -> Element<'a, Message>
         .height(Length::Fixed(36.0))
         .padding(0)
         .style(move |_theme, status| theme::row_button(selected)(_theme, status))
-        .on_press(Message::SelectRow(folder_id))
+        .on_press(Message::NavigateFolder(Some(folder_id)))
         .into()
 }
 

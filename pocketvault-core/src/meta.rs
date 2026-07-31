@@ -152,17 +152,31 @@ impl VaultMeta {
         }
     }
 
+    /// Removes `folder_id` and its entire subtree — every nested subfolder and
+    /// every file anywhere in that subtree, not just direct children.
     pub fn remove_folder(&mut self, folder_id: &str) -> Vec<VaultFileEntry> {
+        let mut ids_to_remove = vec![folder_id.to_string()];
+        let mut i = 0;
+        while i < ids_to_remove.len() {
+            let current = ids_to_remove[i].clone();
+            for sub in self.subfolders(Some(&current)) {
+                ids_to_remove.push(sub.id.clone());
+            }
+            i += 1;
+        }
+
+        let in_subtree = |fid: &str| ids_to_remove.iter().any(|id| id == fid);
+
         let removed_files: Vec<VaultFileEntry> = self
             .files
             .iter()
-            .filter(|f| f.folder_id.as_deref() == Some(folder_id))
+            .filter(|f| f.folder_id.as_deref().is_some_and(in_subtree))
             .cloned()
             .collect();
 
         self.files
-            .retain(|f| f.folder_id.as_deref() != Some(folder_id));
-        self.folders.retain(|f| f.id != folder_id);
+            .retain(|f| !f.folder_id.as_deref().is_some_and(in_subtree));
+        self.folders.retain(|f| !ids_to_remove.contains(&f.id));
 
         removed_files
     }
@@ -179,6 +193,22 @@ impl VaultMeta {
             .iter()
             .filter(|f| f.parent_id.as_deref() == parent_id)
             .collect()
+    }
+
+    /// The chain of folders from the vault root down to `folder_id`, root first.
+    /// Empty if `folder_id` isn't found.
+    pub fn folder_path<'a>(&'a self, folder_id: &str) -> Vec<&'a VaultFolder> {
+        let mut chain = Vec::new();
+        let mut current = self.folders.iter().find(|f| f.id == folder_id);
+        while let Some(f) = current {
+            chain.push(f);
+            current = f
+                .parent_id
+                .as_deref()
+                .and_then(|pid| self.folders.iter().find(|x| x.id == pid));
+        }
+        chain.reverse();
+        chain
     }
 
     pub fn folder_file_count(&self, folder_id: &str) -> usize {
@@ -253,6 +283,21 @@ mod tests {
     }
 
     #[test]
+    fn folder_path_walks_root_to_leaf() {
+        let (mut meta, _) = VaultMeta::create_new("p").unwrap();
+        let root = meta.add_folder("asdasdad", None);
+        let mid = meta.add_folder(".astro", Some(&root));
+        let leaf = meta.add_folder("collections", Some(&mid));
+
+        let path = meta.folder_path(&leaf);
+        let names: Vec<&str> = path.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["asdasdad", ".astro", "collections"]);
+
+        assert_eq!(meta.folder_path(&root).len(), 1);
+        assert!(meta.folder_path("missing").is_empty());
+    }
+
+    #[test]
     fn add_and_remove_file() {
         let (mut meta, _) = VaultMeta::create_new("p").unwrap();
         let id = meta.add_file("abc.pv", None);
@@ -274,6 +319,27 @@ mod tests {
         let removed = meta.remove_folder(&folder_id);
         assert_eq!(removed.len(), 2);
         assert_eq!(meta.files.len(), 1); // root file remains
+    }
+
+    #[test]
+    fn remove_folder_cascades_to_nested_subfolders() {
+        let (mut meta, _) = VaultMeta::create_new("p").unwrap();
+        let root = meta.add_folder("asdasdad", None);
+        let mid = meta.add_folder(".astro", Some(&root));
+        let leaf = meta.add_folder("collections", Some(&mid));
+        meta.add_file("mid.pv", Some(&mid));
+        meta.add_file("leaf.pv", Some(&leaf));
+        meta.add_file("root_file.pv", None);
+
+        let removed = meta.remove_folder(&root);
+        let mut removed_names: Vec<&str> = removed.iter().map(|f| f.pv_filename.as_str()).collect();
+        removed_names.sort();
+        assert_eq!(removed_names, vec!["leaf.pv", "mid.pv"]);
+
+        // root, mid, and leaf are all gone; unrelated root file survives
+        assert!(meta.folders.is_empty());
+        assert_eq!(meta.files.len(), 1);
+        assert_eq!(meta.files[0].pv_filename, "root_file.pv");
     }
 
     #[test]

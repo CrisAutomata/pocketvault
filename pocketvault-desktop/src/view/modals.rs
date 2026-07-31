@@ -3,16 +3,24 @@ use iced::widget::{button, column, container, row, stack, text, text_input};
 use iced::{Element, Length};
 
 use crate::message::Message;
-use crate::state::Modal;
+use crate::state::{Modal, VaultJob};
 use crate::theme;
 
-pub fn wrap<'a>(base: Element<'a, Message>, modal: &'a Option<Modal>) -> Element<'a, Message> {
+pub fn wrap<'a>(
+    base: Element<'a, Message>,
+    modal: &'a Option<Modal>,
+    active_job: &'a Option<VaultJob>,
+) -> Element<'a, Message> {
     let card = match modal {
         None => return base,
         Some(Modal::NewFolder { name }) => new_folder_card(name),
         Some(Modal::Rename { text: rename_text, .. }) => rename_card(rename_text),
         Some(Modal::DeleteConfirm { file_id, folder_id }) => {
             delete_confirm_card(file_id.is_some(), folder_id.is_some())
+        }
+        Some(Modal::ConfirmCancelJob) => {
+            let label = active_job.as_ref().map(|j| j.label.as_str()).unwrap_or("this job");
+            confirm_cancel_job_card(label)
         }
     };
 
@@ -128,6 +136,28 @@ fn delete_confirm_card<'a>(is_file: bool, is_folder: bool) -> Element<'a, Messag
                 "Cancel",
                 "Delete",
                 Message::ConfirmDelete,
+                true,
+            ))
+            .width(Length::Fill)
+            .align_x(Horizontal::Right),
+        ],
+    )
+}
+
+fn confirm_cancel_job_card<'a>(label: &str) -> Element<'a, Message> {
+    modal_shell(
+        170.0,
+        column![
+            text("Stop this job?").size(15).color(theme::text()),
+            text(format!(
+                "Stop encrypting {label}? Anything already encrypted in this job will be removed."
+            ))
+            .size(13)
+            .color(theme::text_secondary()),
+            container(modal_buttons(
+                "Keep Going",
+                "Stop",
+                Message::ConfirmCancelJob,
                 true,
             ))
             .width(Length::Fill)
