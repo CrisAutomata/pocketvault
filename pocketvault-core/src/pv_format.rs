@@ -8,7 +8,7 @@
 //!     [chunk_nonce: 12]  [chunk_len: 4 LE]  [enc_chunk: chunk_len]
 
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +28,27 @@ pub struct PvMetadata {
     pub mime_type: String,
 }
 
+/// Shared cancellation + progress handle for a long-running encrypt/export
+/// job: `cancel` is checked once per chunk (see `write_pv`/`read_pv_body`),
+/// and `bytes_done` is incremented by each chunk's plaintext length so a
+/// caller holding the same `Arc<JobControl>` can read live progress/ETA
+/// without any message-passing (just re-reading the atomic on redraw).
+#[derive(Default)]
+pub struct JobControl {
+    pub cancel: AtomicBool,
+    pub bytes_done: AtomicU64,
+}
+
+impl JobControl {
+    fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    fn add_progress(&self, n: u64) {
+        self.bytes_done.fetch_add(n, Ordering::Relaxed);
+    }
+}
+
 /// Streams `source` through in `CHUNK_SIZE` pieces rather than buffering the
 /// whole file in memory first — the chunk count is derived from
 /// `metadata.original_size` up front so the format (chunk-count-then-chunks)
@@ -37,7 +58,7 @@ pub fn write_pv<W: Write, R: Read>(
     key: &VaultKey,
     metadata: &PvMetadata,
     mut source: R,
-    cancel: &AtomicBool,
+    control: &JobControl,
 ) -> Result<()> {
     writer.write_all(MAGIC)?;
     writer.write_all(&[VERSION])?;
@@ -57,7 +78,7 @@ pub fn write_pv<W: Write, R: Read>(
 
     let mut buf = vec![0u8; CHUNK_SIZE];
     for _ in 0..chunk_count {
-        if cancel.load(Ordering::Relaxed) {
+        if control.is_cancelled() {
             return Err(VaultError::Cancelled);
         }
         let filled = read_up_to(&mut source, &mut buf)?;
@@ -65,6 +86,7 @@ pub fn write_pv<W: Write, R: Read>(
         writer.write_all(&chunk_nonce)?;
         writer.write_all(&(enc_chunk.len() as u32).to_le_bytes())?;
         writer.write_all(&enc_chunk)?;
+        control.add_progress(filled as u64);
     }
 
     Ok(())
@@ -125,14 +147,14 @@ pub fn read_pv_body<R: Read, W: Write>(
     reader: &mut R,
     key: &VaultKey,
     writer: &mut W,
-    cancel: &AtomicBool,
+    control: &JobControl,
 ) -> Result<()> {
     let mut count_buf = [0u8; 4];
     reader.read_exact(&mut count_buf)?;
     let chunk_count = u32::from_le_bytes(count_buf) as usize;
 
     for _ in 0..chunk_count {
-        if cancel.load(Ordering::Relaxed) {
+        if control.is_cancelled() {
             return Err(VaultError::Cancelled);
         }
         let mut chunk_nonce = [0u8; NONCE_SIZE];
@@ -147,6 +169,7 @@ pub fn read_pv_body<R: Read, W: Write>(
 
         let chunk = decrypt(key, &enc_chunk, &chunk_nonce)?;
         writer.write_all(&chunk)?;
+        control.add_progress(chunk.len() as u64);
     }
 
     Ok(())
@@ -155,7 +178,7 @@ pub fn read_pv_body<R: Read, W: Write>(
 pub fn read_pv<R: Read>(reader: &mut R, key: &VaultKey) -> Result<(PvMetadata, Vec<u8>)> {
     let metadata = read_pv_metadata(reader, key)?;
     let mut plaintext = Vec::with_capacity(metadata.original_size as usize);
-    read_pv_body(reader, key, &mut plaintext, &AtomicBool::new(false))?;
+    read_pv_body(reader, key, &mut plaintext, &JobControl::default())?;
     Ok((metadata, plaintext))
 }
 
@@ -182,7 +205,7 @@ mod tests {
         let key = generate_vault_key();
         let data = b"hello pocketvault";
         let mut buf = Vec::new();
-        write_pv(&mut buf, &key, &meta("hello.txt", data.len() as u64), &data[..], &AtomicBool::new(false)).unwrap();
+        write_pv(&mut buf, &key, &meta("hello.txt", data.len() as u64), &data[..], &JobControl::default()).unwrap();
 
         let (m, out) = read_pv(&mut Cursor::new(&buf), &key).unwrap();
         assert_eq!(out, data);
@@ -195,7 +218,7 @@ mod tests {
     fn roundtrip_empty() {
         let key = generate_vault_key();
         let mut buf = Vec::new();
-        write_pv(&mut buf, &key, &meta("empty.bin", 0), &b""[..], &AtomicBool::new(false)).unwrap();
+        write_pv(&mut buf, &key, &meta("empty.bin", 0), &b""[..], &JobControl::default()).unwrap();
 
         let (_, out) = read_pv(&mut Cursor::new(&buf), &key).unwrap();
         assert!(out.is_empty());
@@ -206,7 +229,7 @@ mod tests {
         let key = generate_vault_key();
         let data = vec![0xAAu8; CHUNK_SIZE];
         let mut buf = Vec::new();
-        write_pv(&mut buf, &key, &meta("chunk.bin", CHUNK_SIZE as u64), data.as_slice(), &AtomicBool::new(false)).unwrap();
+        write_pv(&mut buf, &key, &meta("chunk.bin", CHUNK_SIZE as u64), data.as_slice(), &JobControl::default()).unwrap();
 
         let (_, out) = read_pv(&mut Cursor::new(&buf), &key).unwrap();
         assert_eq!(out, data);
@@ -218,7 +241,7 @@ mod tests {
         // 3 chunks + partial
         let data: Vec<u8> = (0..220_000).map(|i| (i % 251) as u8).collect();
         let mut buf = Vec::new();
-        write_pv(&mut buf, &key, &meta("big.bin", data.len() as u64), data.as_slice(), &AtomicBool::new(false)).unwrap();
+        write_pv(&mut buf, &key, &meta("big.bin", data.len() as u64), data.as_slice(), &JobControl::default()).unwrap();
 
         let (_, out) = read_pv(&mut Cursor::new(&buf), &key).unwrap();
         assert_eq!(out, data);
@@ -228,7 +251,7 @@ mod tests {
     fn metadata_only_read() {
         let key = generate_vault_key();
         let mut buf = Vec::new();
-        write_pv(&mut buf, &key, &meta("photo.jpg", 99), &b"fake jpeg"[..], &AtomicBool::new(false)).unwrap();
+        write_pv(&mut buf, &key, &meta("photo.jpg", 99), &b"fake jpeg"[..], &JobControl::default()).unwrap();
 
         let m = read_pv_metadata(&mut Cursor::new(&buf), &key).unwrap();
         assert_eq!(m.original_name, "photo.jpg");
@@ -240,7 +263,7 @@ mod tests {
         let k1 = generate_vault_key();
         let k2 = generate_vault_key();
         let mut buf = Vec::new();
-        write_pv(&mut buf, &k1, &meta("f.bin", 4), &b"test"[..], &AtomicBool::new(false)).unwrap();
+        write_pv(&mut buf, &k1, &meta("f.bin", 4), &b"test"[..], &JobControl::default()).unwrap();
 
         assert!(read_pv(&mut Cursor::new(&buf), &k2).is_err());
     }
@@ -256,7 +279,7 @@ mod tests {
     fn tampered_chunk_fails() {
         let key = generate_vault_key();
         let mut buf = Vec::new();
-        write_pv(&mut buf, &key, &meta("f.bin", 5), &b"hello"[..], &AtomicBool::new(false)).unwrap();
+        write_pv(&mut buf, &key, &meta("f.bin", 5), &b"hello"[..], &JobControl::default()).unwrap();
 
         // Flip a byte near the end (inside encrypted chunk)
         let last = buf.len() - 1;
@@ -298,7 +321,7 @@ mod tests {
         let reader = BoundedReader { data: &data, pos: 0 };
 
         let mut buf = Vec::new();
-        write_pv(&mut buf, &key, &meta("big.bin", data.len() as u64), reader, &AtomicBool::new(false)).unwrap();
+        write_pv(&mut buf, &key, &meta("big.bin", data.len() as u64), reader, &JobControl::default()).unwrap();
 
         let (m, out) = read_pv(&mut Cursor::new(&buf), &key).unwrap();
         assert_eq!(out, data);
@@ -306,13 +329,34 @@ mod tests {
     }
 
     #[test]
+    fn write_pv_and_read_pv_body_report_progress() {
+        let key = generate_vault_key();
+        let data: Vec<u8> = (0..(CHUNK_SIZE * 3 + 500)).map(|i| (i % 251) as u8).collect();
+
+        let write_control = JobControl::default();
+        let mut buf = Vec::new();
+        write_pv(&mut buf, &key, &meta("big.bin", data.len() as u64), data.as_slice(), &write_control).unwrap();
+        assert_eq!(write_control.bytes_done.load(Ordering::Relaxed), data.len() as u64);
+
+        let mut reader = Cursor::new(&buf);
+        read_pv_metadata(&mut reader, &key).unwrap();
+        let read_control = JobControl::default();
+        let mut out = Vec::new();
+        read_pv_body(&mut reader, &key, &mut out, &read_control).unwrap();
+        assert_eq!(read_control.bytes_done.load(Ordering::Relaxed), data.len() as u64);
+    }
+
+    #[test]
     fn write_pv_stops_at_cancellation() {
         let key = generate_vault_key();
         let data = vec![0xABu8; CHUNK_SIZE * 4];
-        let cancel = AtomicBool::new(true);
+        let control = JobControl {
+            cancel: AtomicBool::new(true),
+            ..JobControl::default()
+        };
 
         let mut buf = Vec::new();
-        let err = write_pv(&mut buf, &key, &meta("f.bin", data.len() as u64), data.as_slice(), &cancel)
+        let err = write_pv(&mut buf, &key, &meta("f.bin", data.len() as u64), data.as_slice(), &control)
             .unwrap_err();
         assert!(matches!(err, VaultError::Cancelled));
     }
@@ -322,13 +366,17 @@ mod tests {
         let key = generate_vault_key();
         let data = vec![0xCDu8; CHUNK_SIZE * 4];
         let mut buf = Vec::new();
-        write_pv(&mut buf, &key, &meta("f.bin", data.len() as u64), data.as_slice(), &AtomicBool::new(false))
+        write_pv(&mut buf, &key, &meta("f.bin", data.len() as u64), data.as_slice(), &JobControl::default())
             .unwrap();
 
         let mut reader = Cursor::new(&buf);
         let _metadata = read_pv_metadata(&mut reader, &key).unwrap();
         let mut out = Vec::new();
-        let err = read_pv_body(&mut reader, &key, &mut out, &AtomicBool::new(true)).unwrap_err();
+        let control = JobControl {
+            cancel: AtomicBool::new(true),
+            ..JobControl::default()
+        };
+        let err = read_pv_body(&mut reader, &key, &mut out, &control).unwrap_err();
         assert!(matches!(err, VaultError::Cancelled));
     }
 }

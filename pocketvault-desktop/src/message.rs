@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use iced::window;
 use pocketvault_core::Vault;
+use crate::state::CancelTarget;
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -48,14 +49,19 @@ pub enum Message {
 
     CancelModal,
 
-    // Background vault jobs (big encrypt/export/delete)
-    RequestCancelJob,
-    ConfirmCancelJob,
-    /// No-op — used by the busy-scrim to swallow clicks while a job runs.
-    Ignore,
-    /// Encrypt/delete jobs mutate the vault, so the (possibly rolled-back)
-    /// clone comes back and gets swapped into the session.
-    MutatingJobFinished(Option<(Vault, Result<Vec<String>, String>)>),
+    // Background vault jobs: one encrypt job runs at a time (more just queue
+    // up — see `state::PocketVault::encrypt_queue`), one delete job, one
+    // export job (independent of the other two, always allowed since it's
+    // read-only).
+    RequestCancelJob(CancelTarget),
+    ConfirmCancelJob(CancelTarget),
+    /// Periodic redraw while any job is running, so the ETA text (computed
+    /// straight from a shared `JobControl` in `view()`) keeps counting down.
+    Tick,
+    /// The running encrypt job finished — same shape as before: the (possibly
+    /// rolled-back) vault clone comes back and gets swapped into the session.
+    EncryptJobFinished(Option<(Vault, Result<Vec<String>, String>)>),
+    DeleteJobFinished(Option<(Vault, Result<Vec<String>, String>)>),
     /// Export jobs are read-only — nothing to swap back, just the outcome.
     ExportJobFinished(Option<Result<PathBuf, String>>),
 

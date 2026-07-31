@@ -1,16 +1,22 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
-    sync::{atomic::AtomicBool, Arc},
+    sync::Arc,
+    time::Instant,
 };
 
 use iced::window;
-use pocketvault_core::{PvMetadata, Vault, VaultKey};
+use pocketvault_core::{JobControl, PvMetadata, Vault, VaultKey};
 
 /// Encrypt/export/delete jobs at or above this size run as a background job
-/// (status banner, disabled interaction, cancel-where-applicable) instead of
-/// blocking the UI thread synchronously.
+/// (status banner, cancel-where-applicable) instead of blocking the UI thread
+/// synchronously.
 pub const BIG_JOB_THRESHOLD_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Max total encrypt jobs allowed between the one running and the ones
+/// waiting — past this, starting another shows a "queue full" message
+/// instead of silently accepting it.
+pub const MAX_QUEUE_TOTAL: usize = 10;
 
 pub struct Session {
     pub vault: Vault,
@@ -44,28 +50,50 @@ pub fn vault_folder_total_size(session: &Session, folder_id: &str) -> u64 {
     total
 }
 
-/// What a background vault job is doing — carried in `VaultJob` so the
-/// completion handler knows how to interpret the result and update state.
-#[derive(Clone)]
-pub enum JobKind {
-    EncryptFiles,
-    EncryptFolder,
-    ExportFile,
-    ExportFolder,
-    DeleteFile,
-    /// Carries the folder id so the completion handler can back out of the
-    /// current view if the folder being browsed was the one just deleted.
-    DeleteFolder(String),
+/// What an encrypt job needs in order to actually start once it's its turn —
+/// stashed in `QueuedEncryptJob` for jobs still waiting behind another.
+pub enum EncryptJobInput {
+    Files { paths: Vec<PathBuf>, dest_folder_id: Option<String> },
+    Folder { path: PathBuf, dest_folder_id: Option<String> },
 }
 
-/// A running (or just-requested-to-cancel) background vault job. Only one
-/// runs at a time — starting another is disabled while this is `Some`.
-pub struct VaultJob {
+/// An encrypt job that's been accepted but hasn't started yet because one is
+/// already running (only one runs at a time — see `PocketVault::running_encrypt`).
+pub struct QueuedEncryptJob {
+    pub id: u64,
     pub label: String,
-    pub kind: JobKind,
-    /// `None` for delete jobs — an already-deleted file can't be undone, so
-    /// there's nothing for Cancel to mean there.
-    pub cancel: Option<Arc<AtomicBool>>,
+    pub input: EncryptJobInput,
+    pub total_bytes: u64,
+}
+
+/// The single currently-executing encrypt job. `control` is shared with the
+/// background thread doing the real work: `view()` reads `control.bytes_done`
+/// directly on every redraw to compute live progress/ETA, no message-passing
+/// needed for that part.
+pub struct RunningEncryptJob {
+    pub id: u64,
+    pub label: String,
+    pub control: Arc<JobControl>,
+    pub total_bytes: u64,
+    pub started_at: Instant,
+    pub cancelling: bool,
+}
+
+/// The single currently-executing delete job (big folder/file delete only —
+/// small ones stay instant/synchronous). No cancellation: an unlinked `.pv`
+/// file can't be undone, so there's nothing for Cancel to mean here.
+pub struct RunningDeleteJob {
+    pub label: String,
+    /// `Some(folder_id)` when deleting a folder, so the completion handler
+    /// can back out of the current view if it was the one being browsed.
+    pub target_folder_id: Option<String>,
+}
+
+/// The single currently-executing export job — read-only, so it never
+/// contends with encrypt/delete and is always allowed to run.
+pub struct RunningExportJob {
+    pub label: String,
+    pub control: Arc<JobControl>,
     pub cancelling: bool,
 }
 
@@ -115,7 +143,16 @@ pub enum Modal {
         file_id: Option<String>,
         folder_id: Option<String>,
     },
-    ConfirmCancelJob,
+    ConfirmCancelJob(CancelTarget),
+}
+
+/// Which running job a pending "confirm cancel" modal refers to — encrypt and
+/// export can be active at the same time (export is independent of the
+/// encrypt pool), so a bare "cancel the job" isn't enough to disambiguate.
+#[derive(Debug, Clone, Copy)]
+pub enum CancelTarget {
+    Encrypt,
+    Export,
 }
 
 pub struct PreviewData {
@@ -163,7 +200,26 @@ pub struct PocketVault {
     pub modal: Option<Modal>,
     pub previews: HashMap<window::Id, PreviewData>,
     pub main_window: window::Id,
-    pub active_job: Option<VaultJob>,
+    pub running_encrypt: Option<RunningEncryptJob>,
+    pub encrypt_queue: VecDeque<QueuedEncryptJob>,
+    pub active_delete_job: Option<RunningDeleteJob>,
+    pub active_export_job: Option<RunningExportJob>,
+    pub next_job_id: u64,
+}
+
+impl PocketVault {
+    /// True while an encrypt job is running or waiting its turn — used to
+    /// gate the exclusive slot (New Folder/Rename/Delete/Change Password),
+    /// which must never run concurrently with an in-flight encrypt.
+    pub fn encrypt_pool_busy(&self) -> bool {
+        self.running_encrypt.is_some() || !self.encrypt_queue.is_empty()
+    }
+
+    /// True when the exclusive slot (New Folder/Rename/Delete/Change
+    /// Password) must stay disabled.
+    pub fn exclusive_slot_busy(&self) -> bool {
+        self.encrypt_pool_busy() || self.active_delete_job.is_some()
+    }
 }
 
 pub fn vault_base_dir() -> PathBuf {
@@ -176,6 +232,26 @@ pub fn vault_base_dir() -> PathBuf {
 /// Total bytes across every encrypted file in the vault, regardless of folder.
 pub fn vault_total_size(session: &Session) -> u64 {
     session.meta_cache.values().map(|m| m.original_size).sum()
+}
+
+/// Live "~Ns remaining" (or "~Nm Ns") label for a running job, computed from
+/// bytes processed so far vs. elapsed time — "Estimating…" until at least one
+/// chunk has landed, since a rate can't be known yet.
+pub fn eta_label(control: &JobControl, total_bytes: u64, started_at: Instant) -> String {
+    let done = control.bytes_done.load(std::sync::atomic::Ordering::Relaxed);
+    if done == 0 || total_bytes == 0 {
+        return "Estimating…".to_string();
+    }
+    let elapsed = started_at.elapsed().as_secs_f64();
+    let rate = done as f64 / elapsed.max(0.001);
+    let remaining = total_bytes.saturating_sub(done) as f64;
+    let eta_secs = (remaining / rate.max(1.0)).round() as u64;
+
+    if eta_secs < 60 {
+        format!("~{eta_secs}s remaining")
+    } else {
+        format!("~{}m {}s remaining", eta_secs / 60, eta_secs % 60)
+    }
 }
 
 pub fn format_size(bytes: u64) -> String {

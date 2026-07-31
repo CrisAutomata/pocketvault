@@ -24,7 +24,7 @@ pub fn sidebar_item<'a>(
     selected: bool,
     is_lock: bool,
     can_delete: bool,
-    on_click: Message,
+    on_click: Option<Message>,
     on_delete: Option<Message>,
 ) -> Element<'a, Message> {
     let icon = if is_lock {
@@ -32,7 +32,13 @@ pub fn sidebar_item<'a>(
     } else {
         text("📁").size(13).color(theme::folder_icon())
     };
-    let label_color = if is_lock { theme::danger() } else { theme::text() };
+    let label_color = if on_click.is_none() {
+        theme::text_dim()
+    } else if is_lock {
+        theme::danger()
+    } else {
+        theme::text()
+    };
 
     let mut content = row![
         icon,
@@ -60,7 +66,7 @@ pub fn sidebar_item<'a>(
         .width(Length::Fill)
         .padding([6, 8])
         .style(move |_theme, status| theme::row_button(selected)(_theme, status))
-        .on_press(on_click)
+        .on_press_maybe(on_click)
         .into()
 }
 
@@ -101,7 +107,9 @@ pub fn folder_tree_row<'a>(item: &FolderTreeRow, selected: bool, expanded: bool)
         .into()
 }
 
-pub fn folder_row<'a>(item: &FolderItem, selected: bool) -> Element<'a, Message> {
+/// `mutations_allowed` gates Rename/Delete only — Export never mutates the
+/// vault (no `save()` call), so it stays live regardless of any running job.
+pub fn folder_row<'a>(item: &FolderItem, selected: bool, mutations_allowed: bool) -> Element<'a, Message> {
     let name = item.name.clone();
     let folder_id = item.id.clone();
     let folder_id_for_export = item.id.clone();
@@ -133,11 +141,14 @@ pub fn folder_row<'a>(item: &FolderItem, selected: bool) -> Element<'a, Message>
             button(text("Rename").size(11))
                 .padding([4, 8])
                 .style(|_theme, status| theme::secondary_button(status))
-                .on_press(Message::OpenRenameDialog(folder_id_for_rename, folder_name_for_rename)),
+                .on_press_maybe(mutations_allowed.then_some(Message::OpenRenameDialog(
+                    folder_id_for_rename,
+                    folder_name_for_rename,
+                ))),
             button(text("Delete").size(11))
                 .padding([4, 8])
                 .style(|_theme, status| theme::danger_button(status))
-                .on_press(Message::RequestDeleteFolder(folder_id_for_delete)),
+                .on_press_maybe(mutations_allowed.then_some(Message::RequestDeleteFolder(folder_id_for_delete))),
         ]
         .spacing(4)
         .width(Length::Fixed(180.0)),
@@ -155,7 +166,9 @@ pub fn folder_row<'a>(item: &FolderItem, selected: bool) -> Element<'a, Message>
         .into()
 }
 
-pub fn file_row<'a>(item: &FileItem, selected: bool) -> Element<'a, Message> {
+/// `mutations_allowed` gates Delete only — Preview/Export never mutate the
+/// vault, so they stay live regardless of any running job.
+pub fn file_row<'a>(item: &FileItem, selected: bool, mutations_allowed: bool) -> Element<'a, Message> {
     let display_name = item.display_name.clone();
     let modified = item.modified_str.clone();
     let size = item.size_str.clone();
@@ -188,7 +201,7 @@ pub fn file_row<'a>(item: &FileItem, selected: bool) -> Element<'a, Message> {
         button(text("Delete").size(11))
             .padding([4, 8])
             .style(|_theme, status| theme::danger_button(status))
-            .on_press(Message::RequestDeleteFile(file_id_for_delete)),
+            .on_press_maybe(mutations_allowed.then_some(Message::RequestDeleteFile(file_id_for_delete))),
     );
 
     let content = row![

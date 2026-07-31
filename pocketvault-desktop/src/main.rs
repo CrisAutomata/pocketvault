@@ -38,7 +38,11 @@ fn boot() -> (PocketVault, Task<Message>) {
         modal: None,
         previews: HashMap::new(),
         main_window,
-        active_job: None,
+        running_encrypt: None,
+        encrypt_queue: std::collections::VecDeque::new(),
+        active_delete_job: None,
+        active_export_job: None,
+        next_job_id: 0,
     };
 
     (app, open_task.discard())
@@ -54,8 +58,19 @@ fn title(app: &PocketVault, id: window::Id) -> String {
     }
 }
 
-fn subscription(_app: &PocketVault) -> Subscription<Message> {
-    window::close_events().map(Message::WindowClosed)
+fn subscription(app: &PocketVault) -> Subscription<Message> {
+    let mut subs = vec![window::close_events().map(Message::WindowClosed)];
+
+    // Periodic redraw while any job is running, so the ETA/progress text
+    // (read straight from a shared `JobControl` on each render — see
+    // `state::RunningEncryptJob`) keeps visibly counting down.
+    let any_job_running =
+        app.running_encrypt.is_some() || app.active_delete_job.is_some() || app.active_export_job.is_some();
+    if any_job_running {
+        subs.push(iced::time::every(std::time::Duration::from_millis(300)).map(|_| Message::Tick));
+    }
+
+    Subscription::batch(subs)
 }
 
 fn main() -> iced::Result {

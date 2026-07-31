@@ -107,13 +107,14 @@ pub fn primary_button(status: button::Status) -> button::Style {
 
 /// Neutral/secondary button (Cancel, Export, New Folder, Rename).
 pub fn secondary_button(status: button::Status) -> button::Style {
-    let bg_color = match status {
-        button::Status::Hovered => hover(),
-        _ => badge_bg(),
+    let (bg_color, text_color) = match status {
+        button::Status::Hovered => (hover(), text()),
+        button::Status::Disabled => (badge_bg(), text_dim()),
+        _ => (badge_bg(), text()),
     };
     button::Style {
         background: Some(Background::Color(bg_color)),
-        text_color: text(),
+        text_color,
         border: Border {
             radius: 6.0.into(),
             ..no_border()
@@ -132,6 +133,17 @@ pub fn danger_button(status: button::Status) -> button::Style {
             border: Border {
                 radius: 6.0.into(),
                 ..no_border()
+            },
+            shadow: no_shadow(),
+            snap: false,
+        },
+        button::Status::Disabled => button::Style {
+            background: None,
+            text_color: text_dim(),
+            border: Border {
+                color: divider(),
+                width: 1.0,
+                radius: 6.0.into(),
             },
             shadow: no_shadow(),
             snap: false,
