@@ -78,9 +78,16 @@ impl Vault {
     // ── Folder operations ────────────────────────────────────────────────────
 
     pub fn create_folder(&mut self, name: &str, parent_id: Option<&str>) -> Result<String> {
-        let id = self.meta.add_folder(name, parent_id);
+        let id = self.create_folder_inner(name, parent_id);
         self.save()?;
         Ok(id)
+    }
+
+    /// Same as `create_folder` but without the persist — used by batch/recursive
+    /// callers (`encrypt_folder_contents`) that save once at the end of the whole
+    /// operation instead of once per subfolder created.
+    fn create_folder_inner(&mut self, name: &str, parent_id: Option<&str>) -> String {
+        self.meta.add_folder(name, parent_id)
     }
 
     pub fn rename_folder(&mut self, folder_id: &str, new_name: &str) -> Result<()> {
@@ -117,6 +124,23 @@ impl Vault {
     // ── File operations ──────────────────────────────────────────────────────
 
     pub fn encrypt_file(
+        &mut self,
+        source: &Path,
+        folder_id: Option<&str>,
+        key: &VaultKey,
+        control: &JobControl,
+    ) -> Result<String> {
+        let id = self.encrypt_file_inner(source, folder_id, key, control)?;
+        self.save()?;
+        Ok(id)
+    }
+
+    /// Same as `encrypt_file` but without the persist — used by batch/recursive
+    /// callers (`encrypt_files`, `encrypt_folder_contents`) that save once at the
+    /// end of the whole operation instead of once per file. Rewriting the entire
+    /// vault.meta JSON after every single file was the dominant cost — and the
+    /// source of wildly wrong ETA estimates — for folders with many files.
+    fn encrypt_file_inner(
         &mut self,
         source: &Path,
         folder_id: Option<&str>,
@@ -164,14 +188,14 @@ impl Vault {
         }
 
         let id = self.meta.add_file(&pv_filename, folder_id);
-        self.save()?;
 
         Ok(id)
     }
 
     /// Encrypts every path in `paths` into `folder_id` as one all-or-nothing
     /// batch: if any file fails (including cancellation), every file already
-    /// added earlier in this same batch is rolled back via `delete_file`.
+    /// added earlier in this same batch is rolled back. Persists once at the
+    /// end (success or rollback) rather than once per file.
     pub fn encrypt_files(
         &mut self,
         paths: &[PathBuf],
@@ -183,20 +207,23 @@ impl Vault {
         for path in paths {
             if control.cancel.load(Ordering::Relaxed) {
                 for id in &ids {
-                    let _ = self.delete_file(id);
+                    let _ = self.delete_file_inner(id);
                 }
+                let _ = self.save();
                 return Err(VaultError::Cancelled);
             }
-            match self.encrypt_file(path, folder_id, key, control) {
+            match self.encrypt_file_inner(path, folder_id, key, control) {
                 Ok(id) => ids.push(id),
                 Err(e) => {
                     for id in &ids {
-                        let _ = self.delete_file(id);
+                        let _ = self.delete_file_inner(id);
                     }
+                    let _ = self.save();
                     return Err(e);
                 }
             }
         }
+        self.save()?;
         Ok(ids)
     }
 
@@ -218,17 +245,27 @@ impl Vault {
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| VaultError::FileNotFound(source_dir.to_string_lossy().to_string()))?;
-        let folder_id = self.create_folder(name, parent_folder_id)?;
+        let folder_id = self.create_folder_inner(name, parent_folder_id);
 
         match self.encrypt_folder_contents(source_dir, &folder_id, key, control) {
-            Ok(ids) => Ok(ids),
+            Ok(ids) => {
+                self.save()?;
+                Ok(ids)
+            }
             Err(e) => {
+                // `delete_folder` persists its own rollback in a single save, so
+                // the in-memory adds made by `encrypt_folder_contents` (which,
+                // like `encrypt_files`, doesn't save per-entry) still end up
+                // correctly reverted on disk here.
                 let _ = self.delete_folder(&folder_id);
                 Err(e)
             }
         }
     }
 
+    /// Recurses without persisting — `encrypt_folder` saves once for the whole
+    /// subtree (success) or relies on `delete_folder`'s single save (failure),
+    /// instead of rewriting vault.meta after every file and every subfolder.
     fn encrypt_folder_contents(
         &mut self,
         source_dir: &Path,
@@ -250,16 +287,25 @@ impl Vault {
                     .file_name()
                     .and_then(|n| n.to_str())
                     .ok_or_else(|| VaultError::FileNotFound(path.to_string_lossy().to_string()))?;
-                let sub_id = self.create_folder(sub_name, Some(folder_id))?;
+                let sub_id = self.create_folder_inner(sub_name, Some(folder_id));
                 file_ids.extend(self.encrypt_folder_contents(&path, &sub_id, key, control)?);
             } else if path.is_file() {
-                file_ids.push(self.encrypt_file(&path, Some(folder_id), key, control)?);
+                file_ids.push(self.encrypt_file_inner(&path, Some(folder_id), key, control)?);
             }
         }
         Ok(file_ids)
     }
 
     pub fn delete_file(&mut self, file_id: &str) -> Result<()> {
+        self.delete_file_inner(file_id)?;
+        self.save()?;
+        Ok(())
+    }
+
+    /// Same as `delete_file` but without the persist — used by `encrypt_files`'s
+    /// rollback path, which saves once after the whole rollback instead of once
+    /// per file removed.
+    fn delete_file_inner(&mut self, file_id: &str) -> Result<()> {
         let entry = self
             .meta
             .remove_file(file_id)
@@ -269,7 +315,6 @@ impl Vault {
         if path.exists() {
             fs::remove_file(path)?;
         }
-        self.save()?;
         Ok(())
     }
 
