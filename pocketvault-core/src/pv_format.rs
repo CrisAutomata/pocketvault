@@ -17,6 +17,7 @@ use crate::error::{Result, VaultError};
 
 const MAGIC: &[u8; 4] = b"PVLT";
 const VERSION: u8 = 1;
+
 // 1 MiB — large enough to cut per-chunk overhead (nonce generation, AEAD
 // call, and the write syscalls below) by ~16x versus the original 64 KB
 // without meaningfully raising peak memory (still O(chunk size), nowhere
