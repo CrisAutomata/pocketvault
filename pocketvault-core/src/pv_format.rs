@@ -17,7 +17,13 @@ use crate::error::{Result, VaultError};
 
 const MAGIC: &[u8; 4] = b"PVLT";
 const VERSION: u8 = 1;
-pub const CHUNK_SIZE: usize = 65536; // 64 KB
+// 1 MiB — large enough to cut per-chunk overhead (nonce generation, AEAD
+// call, and the write syscalls below) by ~16x versus the original 64 KB
+// without meaningfully raising peak memory (still O(chunk size), nowhere
+// near "buffer the whole file" territory). Safe to change any time: chunk
+// boundaries are stored explicitly per-file, so existing `.pv` files written
+// with a different `CHUNK_SIZE` still read back correctly.
+pub const CHUNK_SIZE: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PvMetadata {

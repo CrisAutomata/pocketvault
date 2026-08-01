@@ -9,9 +9,10 @@ use pocketvault_core::{JobControl, Vault};
 
 use crate::message::Message;
 use crate::state::{
-    build_meta_cache, vault_folder_total_size, AuthMode, AuthState, CancelTarget, EncryptJobInput,
-    Modal, PocketVault, PreviewData, QueuedEncryptJob, RunningDeleteJob, RunningEncryptJob,
-    RunningExportJob, Screen, Session, BIG_JOB_THRESHOLD_BYTES, MAX_QUEUE_TOTAL,
+    build_meta_cache, freeze_eta_if_ready, vault_folder_total_size, AuthMode, AuthState,
+    CancelTarget, EncryptJobInput, Modal, PocketVault, PreviewData, QueuedEncryptJob,
+    RunningDeleteJob, RunningEncryptJob, RunningExportJob, Screen, Session,
+    BIG_JOB_THRESHOLD_BYTES, MAX_QUEUE_TOTAL,
 };
 
 fn auth_mut(app: &mut PocketVault) -> Option<&mut AuthState> {
@@ -56,7 +57,7 @@ pub fn update(app: &mut PocketVault, message: Message) -> Task<Message> {
         }
 
         Message::ShowChangePasswordScreen => {
-            if app.session.is_some() && !app.exclusive_slot_busy() {
+            if app.session.is_some() && !app.any_job_active() {
                 app.screen = Screen::Auth(AuthState::new(AuthMode::ChangePassword));
             }
             Task::none()
@@ -135,7 +136,7 @@ pub fn update(app: &mut PocketVault, message: Message) -> Task<Message> {
         Message::FolderPicked(path_opt) => start_encrypt_folder(app, path_opt),
 
         Message::ExportFile(file_id) => {
-            if app.active_export_job.is_some() {
+            if app.any_job_active() {
                 return Task::none();
             }
             window::run(app.main_window, |w| {
@@ -154,7 +155,7 @@ pub fn update(app: &mut PocketVault, message: Message) -> Task<Message> {
         Message::ExportDestPicked(file_id, dest_dir) => start_export_file(app, &file_id, dest_dir),
 
         Message::ExportFolder(folder_id) => {
-            if app.active_export_job.is_some() {
+            if app.any_job_active() {
                 return Task::none();
             }
             window::run(app.main_window, |w| {
@@ -177,11 +178,17 @@ pub fn update(app: &mut PocketVault, message: Message) -> Task<Message> {
             start_export_folder(app, &folder_id, dest_dir)
         }
 
-        Message::PreviewFile(file_id) => preview_file(app, &file_id),
+        Message::PreviewFile(file_id) => {
+            if app.any_job_active() {
+                Task::none()
+            } else {
+                preview_file(app, &file_id)
+            }
+        }
         Message::DialogDismissed => Task::none(),
 
         Message::OpenNewFolderDialog => {
-            if !app.exclusive_slot_busy() {
+            if !app.any_job_active() {
                 app.modal = Some(Modal::NewFolder {
                     name: String::new(),
                 });
@@ -197,7 +204,7 @@ pub fn update(app: &mut PocketVault, message: Message) -> Task<Message> {
         Message::ConfirmNewFolder => {
             if let Some(Modal::NewFolder { name }) = app.modal.take() {
                 let trimmed = name.trim().to_string();
-                if !trimmed.is_empty() && !app.exclusive_slot_busy() {
+                if !trimmed.is_empty() && !app.any_job_active() {
                     if let Some(session) = app.session.as_mut() {
                         let _ = session
                             .vault
@@ -209,7 +216,7 @@ pub fn update(app: &mut PocketVault, message: Message) -> Task<Message> {
         }
 
         Message::OpenRenameDialog(folder_id, current_name) => {
-            if !app.exclusive_slot_busy() {
+            if !app.any_job_active() {
                 app.modal = Some(Modal::Rename {
                     folder_id,
                     text: current_name,
@@ -226,7 +233,7 @@ pub fn update(app: &mut PocketVault, message: Message) -> Task<Message> {
         Message::ConfirmRename => {
             if let Some(Modal::Rename { folder_id, text }) = app.modal.take() {
                 let trimmed = text.trim().to_string();
-                if !trimmed.is_empty() && !app.exclusive_slot_busy() {
+                if !trimmed.is_empty() && !app.any_job_active() {
                     if let Some(session) = app.session.as_mut() {
                         if let Err(e) = session.vault.rename_folder(&folder_id, &trimmed) {
                             eprintln!("Rename folder error: {e}");
@@ -238,7 +245,7 @@ pub fn update(app: &mut PocketVault, message: Message) -> Task<Message> {
         }
 
         Message::RequestDeleteFile(id) => {
-            if !app.exclusive_slot_busy() {
+            if !app.any_job_active() {
                 app.modal = Some(Modal::DeleteConfirm {
                     file_id: Some(id),
                     folder_id: None,
@@ -247,7 +254,7 @@ pub fn update(app: &mut PocketVault, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::RequestDeleteFolder(id) => {
-            if !app.exclusive_slot_busy() {
+            if !app.any_job_active() {
                 app.modal = Some(Modal::DeleteConfirm {
                     file_id: None,
                     folder_id: Some(id),
@@ -299,7 +306,16 @@ pub fn update(app: &mut PocketVault, message: Message) -> Task<Message> {
             }
             Task::none()
         }
-        Message::Tick => Task::none(),
+        Message::RemoveQueuedJob(id) => {
+            app.encrypt_queue.retain(|j| j.id != id);
+            Task::none()
+        }
+        Message::Tick => {
+            if let Some(job) = app.running_encrypt.as_mut() {
+                freeze_eta_if_ready(job);
+            }
+            Task::none()
+        }
 
         Message::EncryptJobFinished(outcome) => {
             let finished_id = app.running_encrypt.as_ref().map(|j| j.id);
@@ -577,6 +593,7 @@ fn start_running_encrypt(
         total_bytes,
         started_at: Instant::now(),
         cancelling: false,
+        estimated_total_secs: None,
     });
 
     let (tx, rx) = iced::futures::channel::oneshot::channel();
@@ -740,7 +757,7 @@ fn start_export_file(
         Some(d) => d,
         None => return Task::none(),
     };
-    if app.active_export_job.is_some() {
+    if app.any_job_active() {
         return Task::none();
     }
     let session = match app.session.as_ref() {
@@ -803,7 +820,7 @@ fn start_export_folder(
         Some(d) => d,
         None => return Task::none(),
     };
-    if app.active_export_job.is_some() {
+    if app.any_job_active() {
         return Task::none();
     }
     let session = match app.session.as_ref() {
@@ -856,7 +873,7 @@ fn start_export_folder(
 }
 
 fn start_delete_file(app: &mut PocketVault, file_id: String) -> Task<Message> {
-    if app.exclusive_slot_busy() {
+    if app.any_job_active() {
         return Task::none();
     }
     let session = match app.session.as_mut() {
@@ -901,7 +918,7 @@ fn start_delete_file(app: &mut PocketVault, file_id: String) -> Task<Message> {
 }
 
 fn start_delete_folder(app: &mut PocketVault, folder_id: String) -> Task<Message> {
-    if app.exclusive_slot_busy() {
+    if app.any_job_active() {
         return Task::none();
     }
     let session = match app.session.as_mut() {

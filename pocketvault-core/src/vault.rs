@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::{BufReader, BufWriter, Write},
     path::{Path, PathBuf},
     sync::atomic::Ordering,
     time::{SystemTime, UNIX_EPOCH},
@@ -149,10 +150,14 @@ impl Vault {
         // Streams the source through in fixed-size chunks (see `write_pv`)
         // instead of reading the whole file into memory first — a multi-GB
         // import previously allocated a same-sized `Vec<u8>` up front, which
-        // could exhaust memory and abort the process.
-        let source_file = fs::File::open(source)?;
-        let mut file = fs::File::create(&pv_path)?;
-        if let Err(e) = write_pv(&mut file, key, &pv_meta, source_file, control) {
+        // could exhaust memory and abort the process. Buffered so each
+        // chunk's 3 small writes (nonce, length, ciphertext) don't each cost
+        // a separate write syscall.
+        let source_file = BufReader::new(fs::File::open(source)?);
+        let mut file = BufWriter::new(fs::File::create(&pv_path)?);
+        let write_result = write_pv(&mut file, key, &pv_meta, source_file, control)
+            .and_then(|()| file.flush().map_err(VaultError::from));
+        if let Err(e) = write_result {
             drop(file);
             let _ = fs::remove_file(&pv_path); // no partial .pv left behind on cancel/error
             return Err(e);
@@ -282,14 +287,18 @@ impl Vault {
             .find(|f| f.id == file_id)
             .ok_or_else(|| VaultError::FileNotFound(file_id.to_string()))?;
 
-        let mut f = fs::File::open(self.pv_path(&entry.pv_filename))?;
+        let mut f = BufReader::new(fs::File::open(self.pv_path(&entry.pv_filename))?);
         let meta = read_pv_metadata(&mut f, key)?;
 
         let dest = dest_dir.join(&meta.original_name);
         // Streams decrypted chunks straight to disk instead of buffering the
         // whole plaintext in memory first (same rationale as `encrypt_file`).
-        let mut out = fs::File::create(&dest)?;
-        if let Err(e) = read_pv_body(&mut f, key, &mut out, control) {
+        // Buffered on both sides so each chunk's several small reads/writes
+        // don't each cost a separate syscall.
+        let mut out = BufWriter::new(fs::File::create(&dest)?);
+        let read_result = read_pv_body(&mut f, key, &mut out, control)
+            .and_then(|()| out.flush().map_err(VaultError::from));
+        if let Err(e) = read_result {
             drop(out);
             let _ = fs::remove_file(&dest); // no partial export left behind on cancel/error
             return Err(e);
@@ -372,7 +381,7 @@ impl Vault {
             .find(|f| f.id == file_id)
             .ok_or_else(|| VaultError::FileNotFound(file_id.to_string()))?;
 
-        let mut f = fs::File::open(self.pv_path(&entry.pv_filename))?;
+        let mut f = BufReader::new(fs::File::open(self.pv_path(&entry.pv_filename))?);
         read_pv(&mut f, key)
     }
 

@@ -100,14 +100,15 @@ fn vdivider<'a>() -> Element<'a, Message> {
         .into()
 }
 
-/// One line in the job banner: a status label, optionally a Cancel button.
-fn banner_line<'a>(label: String, cancel: Option<Message>) -> Element<'a, Message> {
+/// One line in the job banner: a status label, optionally a trailing action
+/// button (e.g. "Cancel" for a running job, "Remove" for a queued one).
+fn banner_line<'a>(label: String, action: Option<(&'static str, Message)>) -> Element<'a, Message> {
     let mut line = row![text(label).size(12).color(theme::text())]
         .spacing(12)
         .align_y(Vertical::Center);
-    if let Some(msg) = cancel {
+    if let Some((button_label, msg)) = action {
         line = line.push(
-            button(text("Cancel").size(12).color(theme::danger()))
+            button(text(button_label).size(12).color(theme::danger()))
                 .style(|_theme, status| theme::secondary_button(status))
                 .padding([4, 10])
                 .on_press(msg),
@@ -137,12 +138,13 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
         }
     };
 
-    // Only Rename/Delete/New Folder/Change Password are held back — they're
-    // the only actions that mutate the vault outside of encrypt/export, so
-    // they're the only ones that could race an in-flight encrypt/delete job.
-    // Encrypt Files/Encrypt Folder stay live (queueing more is the point),
-    // and Export/Preview never mutate the vault so they're untouched too.
-    let mutations_allowed = !app.exclusive_slot_busy();
+    // While any job is running or queued, everything is locked down except:
+    // cancelling the running job, removing a queued one, and starting more
+    // encrypt jobs (queueing is the whole point of the queue). That includes
+    // Export/Preview even though they're read-only — a single, easy "the app
+    // is busy" state is simpler than tracking which actions are technically
+    // safe to allow.
+    let interaction_allowed = !app.any_job_active();
 
     // ── Toolbar ──────────────────────────────────────────────────────
     let toolbar = container(
@@ -166,7 +168,7 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
                 button(row![text("📁").size(13), text("New Folder").size(12)].spacing(4))
                     .padding([6, 12])
                     .style(|_theme, status| theme::secondary_button(status))
-                    .on_press_maybe(mutations_allowed.then_some(Message::OpenNewFolderDialog)),
+                    .on_press_maybe(interaction_allowed.then_some(Message::OpenNewFolderDialog)),
             ]
             .spacing(8)
             .width(Length::Fill),
@@ -226,7 +228,7 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
                 false,
                 false,
                 false,
-                mutations_allowed.then_some(Message::ShowChangePasswordScreen),
+                interaction_allowed.then_some(Message::ShowChangePasswordScreen),
                 None,
             ),
             sidebar_item(
@@ -313,7 +315,7 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
         );
         for f in &folders {
             let selected = app.selected_id == f.id;
-            list = list.push(folder_row(f, selected, mutations_allowed));
+            list = list.push(folder_row(f, selected, interaction_allowed));
         }
     }
 
@@ -332,7 +334,7 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
         );
         for f in &files {
             let selected = app.selected_id == f.id;
-            list = list.push(file_row(f, selected, mutations_allowed));
+            list = list.push(file_row(f, selected, interaction_allowed));
         }
     }
 
@@ -365,33 +367,28 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
     .style(theme::container_with_bg(theme::path_bar_bg()));
 
     // ── Job banner ───────────────────────────────────────────────────
-    // No full-screen dimming — the browser stays fully interactive except
-    // for the handful of buttons gated by `mutations_allowed` above. This is
-    // just a status strip: what's running, what's queued, and Cancel where
-    // it means something (encrypt/export — not delete, since an unlinked
-    // file can't be undone).
+    // No full-screen dimming — the browser is locked down via
+    // `interaction_allowed` above instead. This banner is the "what's
+    // happening" list: the running job with a live ETA + Cancel, every
+    // queued job with its own Remove, and the delete/export jobs (delete has
+    // no Cancel — an unlinked file can't be undone).
     let mut banner_lines: Vec<Element<Message>> = Vec::new();
 
     if let Some(job) = &app.running_encrypt {
         let status = if job.cancelling {
             "Cancelling…".to_string()
         } else {
-            format!(
-                "Encrypting {} — {}",
-                job.label,
-                eta_label(&job.control, job.total_bytes, job.started_at)
-            )
+            format!("Encrypting {} — {}", job.label, eta_label(job))
         };
-        let cancel = (!job.cancelling).then_some(Message::RequestCancelJob(CancelTarget::Encrypt));
-        banner_lines.push(banner_line(status, cancel));
+        let action = (!job.cancelling)
+            .then_some(("Cancel", Message::RequestCancelJob(CancelTarget::Encrypt)));
+        banner_lines.push(banner_line(status, action));
     }
-    if !app.encrypt_queue.is_empty() {
-        banner_lines.push(
-            text(format!("+{} queued", app.encrypt_queue.len()))
-                .size(12)
-                .color(theme::text_secondary())
-                .into(),
-        );
+    for queued in &app.encrypt_queue {
+        banner_lines.push(banner_line(
+            format!("{} — waiting", queued.label),
+            Some(("Remove", Message::RemoveQueuedJob(queued.id))),
+        ));
     }
     if let Some(job) = &app.active_delete_job {
         banner_lines.push(banner_line(format!("Deleting {}…", job.label), None));
@@ -402,8 +399,9 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
         } else {
             format!("Exporting {}…", job.label)
         };
-        let cancel = (!job.cancelling).then_some(Message::RequestCancelJob(CancelTarget::Export));
-        banner_lines.push(banner_line(status, cancel));
+        let action = (!job.cancelling)
+            .then_some(("Cancel", Message::RequestCancelJob(CancelTarget::Export)));
+        banner_lines.push(banner_line(status, action));
     }
 
     let mut layout = column![toolbar, divider()];

@@ -107,12 +107,14 @@ pub fn folder_tree_row<'a>(
         .into()
 }
 
-/// `mutations_allowed` gates Rename/Delete only — Export never mutates the
-/// vault (no `save()` call), so it stays live regardless of any running job.
+/// `interaction_allowed` gates every action button here (Export/Rename/
+/// Delete) — while any job is running or queued, the only live things in the
+/// whole browser are cancelling/removing a job and starting more encrypts
+/// (see `PocketVault::any_job_active`).
 pub fn folder_row<'a>(
     item: &FolderItem,
     selected: bool,
-    mutations_allowed: bool,
+    interaction_allowed: bool,
 ) -> Element<'a, Message> {
     let name = item.name.clone();
     let folder_id = item.id.clone();
@@ -141,11 +143,13 @@ pub fn folder_row<'a>(
             button(text("Export").size(11))
                 .padding([4, 8])
                 .style(|_theme, status| theme::secondary_button(status))
-                .on_press(Message::ExportFolder(folder_id_for_export)),
+                .on_press_maybe(
+                    interaction_allowed.then_some(Message::ExportFolder(folder_id_for_export))
+                ),
             button(text("Rename").size(11))
                 .padding([4, 8])
                 .style(|_theme, status| theme::secondary_button(status))
-                .on_press_maybe(mutations_allowed.then_some(Message::OpenRenameDialog(
+                .on_press_maybe(interaction_allowed.then_some(Message::OpenRenameDialog(
                     folder_id_for_rename,
                     folder_name_for_rename,
                 ))),
@@ -153,7 +157,8 @@ pub fn folder_row<'a>(
                 .padding([4, 8])
                 .style(|_theme, status| theme::danger_button(status))
                 .on_press_maybe(
-                    mutations_allowed.then_some(Message::RequestDeleteFolder(folder_id_for_delete))
+                    interaction_allowed
+                        .then_some(Message::RequestDeleteFolder(folder_id_for_delete))
                 ),
         ]
         .spacing(4)
@@ -172,12 +177,14 @@ pub fn folder_row<'a>(
         .into()
 }
 
-/// `mutations_allowed` gates Delete only — Preview/Export never mutate the
-/// vault, so they stay live regardless of any running job.
+/// `interaction_allowed` gates every action button here (Preview/Export/
+/// Delete) — while any job is running or queued, the only live things in the
+/// whole browser are cancelling/removing a job and starting more encrypts
+/// (see `PocketVault::any_job_active`).
 pub fn file_row<'a>(
     item: &FileItem,
     selected: bool,
-    mutations_allowed: bool,
+    interaction_allowed: bool,
 ) -> Element<'a, Message> {
     let display_name = item.display_name.clone();
     let modified = item.modified_str.clone();
@@ -196,7 +203,9 @@ pub fn file_row<'a>(
             button(text("Preview").size(11))
                 .padding([4, 8])
                 .style(|_theme, status| theme::primary_button(status))
-                .on_press(Message::PreviewFile(file_id_for_preview)),
+                .on_press_maybe(
+                    interaction_allowed.then_some(Message::PreviewFile(file_id_for_preview)),
+                ),
         );
     }
 
@@ -204,7 +213,7 @@ pub fn file_row<'a>(
         button(text("Export").size(11))
             .padding([4, 8])
             .style(|_theme, status| theme::secondary_button(status))
-            .on_press(Message::ExportFile(file_id_for_export)),
+            .on_press_maybe(interaction_allowed.then_some(Message::ExportFile(file_id_for_export))),
     );
 
     actions = actions.push(
@@ -212,7 +221,7 @@ pub fn file_row<'a>(
             .padding([4, 8])
             .style(|_theme, status| theme::danger_button(status))
             .on_press_maybe(
-                mutations_allowed.then_some(Message::RequestDeleteFile(file_id_for_delete)),
+                interaction_allowed.then_some(Message::RequestDeleteFile(file_id_for_delete)),
             ),
     );
 

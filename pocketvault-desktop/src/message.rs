@@ -51,10 +51,13 @@ pub enum Message {
 
     // Background vault jobs: one encrypt job runs at a time (more just queue
     // up — see `state::PocketVault::encrypt_queue`), one delete job, one
-    // export job (independent of the other two, always allowed since it's
-    // read-only).
+    // export job. While any of these is active, everything else in the vault
+    // browser is disabled except cancelling/removing a job and queueing more
+    // encrypts (see `PocketVault::any_job_active`).
     RequestCancelJob(CancelTarget),
     ConfirmCancelJob(CancelTarget),
+    /// Removes a not-yet-started job from the encrypt queue.
+    RemoveQueuedJob(u64),
     /// Periodic redraw while any job is running, so the ETA text (computed
     /// straight from a shared `JobControl` in `view()`) keeps counting down.
     Tick,

@@ -85,7 +85,7 @@ pub struct QueuedEncryptJob {
 
 /// The single currently-executing encrypt job. `control` is shared with the
 /// background thread doing the real work: `view()` reads `control.bytes_done`
-/// directly on every redraw to compute live progress/ETA, no message-passing
+/// directly on every redraw to compute live progress, no message-passing
 /// needed for that part.
 pub struct RunningEncryptJob {
     pub id: u64,
@@ -94,6 +94,11 @@ pub struct RunningEncryptJob {
     pub total_bytes: u64,
     pub started_at: Instant,
     pub cancelling: bool,
+    /// The job's estimated total duration, set once (see `freeze_eta_if_ready`
+    /// in `update.rs`, run on each `Tick`) from an early throughput sample and
+    /// never recomputed after — so the displayed countdown ticks down
+    /// smoothly instead of jumping around as a live rate estimate wobbles.
+    pub estimated_total_secs: Option<f64>,
 }
 
 /// The single currently-executing delete job (big folder/file delete only —
@@ -232,10 +237,17 @@ impl PocketVault {
         self.running_encrypt.is_some() || !self.encrypt_queue.is_empty()
     }
 
-    /// True when the exclusive slot (New Folder/Rename/Delete/Change
-    /// Password) must stay disabled.
-    pub fn exclusive_slot_busy(&self) -> bool {
-        self.encrypt_pool_busy() || self.active_delete_job.is_some()
+    /// True while *any* job is running or queued. Everything in the vault
+    /// browser is disabled while this is true except: cancelling the running
+    /// job, removing a queued job, and starting more encrypt jobs (queueing
+    /// is always allowed — that's the whole point of the queue). Even
+    /// Export/Preview are held back here, even though they're technically
+    /// safe (read-only) — this is a UX choice for a single, easy-to-reason-
+    /// about "busy" state rather than a strict safety requirement.
+    pub fn any_job_active(&self) -> bool {
+        self.encrypt_pool_busy()
+            || self.active_delete_job.is_some()
+            || self.active_export_job.is_some()
     }
 }
 
@@ -251,20 +263,57 @@ pub fn vault_total_size(session: &Session) -> u64 {
     session.meta_cache.values().map(|m| m.original_size).sum()
 }
 
-/// Live "~Ns remaining" (or "~Nm Ns") label for a running job, computed from
-/// bytes processed so far vs. elapsed time — "Estimating…" until at least one
-/// chunk has landed, since a rate can't be known yet.
-pub fn eta_label(control: &JobControl, total_bytes: u64, started_at: Instant) -> String {
-    let done = control
+/// Minimum elapsed time before trusting a throughput sample enough to freeze
+/// an ETA from it — the first chunk or two is disproportionately affected by
+/// disk-seek/cold-cache latency, so measuring too early gives a wildly wrong
+/// rate (this was the actual cause of the "estimate keeps changing" jitter:
+/// recomputing a live average every tick lets that early noise, and any
+/// later throughput variation, keep reshuffling the prediction).
+const ETA_WARMUP_SECS: f64 = 0.5;
+/// ...and/or at least this fraction of the job done, whichever comes first —
+/// so a big job doesn't wait a fixed wall-clock time before showing an ETA.
+const ETA_WARMUP_FRACTION: f64 = 0.01;
+
+/// Freezes `job.estimated_total_secs` once a stable-enough throughput sample
+/// is available. Called on each `Tick`; a no-op once already set — the whole
+/// point is to set it *once* and never revise it, so the displayed countdown
+/// decreases smoothly instead of being re-derived from a wobbly live rate.
+pub fn freeze_eta_if_ready(job: &mut RunningEncryptJob) {
+    if job.estimated_total_secs.is_some() {
+        return;
+    }
+    let done = job
+        .control
         .bytes_done
         .load(std::sync::atomic::Ordering::Relaxed);
-    if done == 0 || total_bytes == 0 {
-        return "Estimating…".to_string();
+    if done == 0 || job.total_bytes == 0 {
+        return;
     }
-    let elapsed = started_at.elapsed().as_secs_f64();
+    let elapsed = job.started_at.elapsed().as_secs_f64();
+    let fraction_done = done as f64 / job.total_bytes as f64;
+    if elapsed < ETA_WARMUP_SECS && fraction_done < ETA_WARMUP_FRACTION {
+        return;
+    }
     let rate = done as f64 / elapsed.max(0.001);
-    let remaining = total_bytes.saturating_sub(done) as f64;
-    let eta_secs = (remaining / rate.max(1.0)).round() as u64;
+    job.estimated_total_secs = Some(job.total_bytes as f64 / rate.max(1.0));
+}
+
+/// "~Ns remaining" (or "~Nm Ns") label for a running job — a stopwatch
+/// counting down from the estimate `freeze_eta_if_ready` set once, not a
+/// value recomputed from a live (and therefore jumpy) throughput average.
+/// "Estimating…" before that estimate exists yet; "Finishing up…" if the
+/// job runs a little past its estimate (expected sometimes — the point is
+/// to be predictable, not perfectly accurate to the second).
+pub fn eta_label(job: &RunningEncryptJob) -> String {
+    let Some(total_secs) = job.estimated_total_secs else {
+        return "Estimating…".to_string();
+    };
+    let elapsed = job.started_at.elapsed().as_secs_f64();
+    let remaining = total_secs - elapsed;
+    if remaining <= 0.0 {
+        return "Finishing up…".to_string();
+    }
+    let eta_secs = remaining.round() as u64;
 
     if eta_secs < 60 {
         format!("~{eta_secs}s remaining")
