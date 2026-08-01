@@ -20,7 +20,7 @@ pub fn sidebar_item<'a>(
     selected: bool,
     is_lock: bool,
     can_delete: bool,
-    on_click: Message,
+    on_click: Option<Message>,
     on_delete: Option<Message>,
 ) -> Element<'a, Message> {
     let icon = if is_lock {
@@ -28,7 +28,9 @@ pub fn sidebar_item<'a>(
     } else {
         text("📁").size(13).color(theme::folder_icon())
     };
-    let label_color = if is_lock {
+    let label_color = if on_click.is_none() {
+        theme::text_dim()
+    } else if is_lock {
         theme::danger()
     } else {
         theme::text()
@@ -60,7 +62,7 @@ pub fn sidebar_item<'a>(
         .width(Length::Fill)
         .padding([6, 8])
         .style(move |_theme, status| theme::row_button(selected)(_theme, status))
-        .on_press(on_click)
+        .on_press_maybe(on_click)
         .into()
 }
 
@@ -105,7 +107,15 @@ pub fn folder_tree_row<'a>(
         .into()
 }
 
-pub fn folder_row<'a>(item: &FolderItem, selected: bool) -> Element<'a, Message> {
+/// `interaction_allowed` gates every action button here (Export/Rename/
+/// Delete) — while any job is running or queued, the only live things in the
+/// whole browser are cancelling/removing a job and starting more encrypts
+/// (see `PocketVault::any_job_active`).
+pub fn folder_row<'a>(
+    item: &FolderItem,
+    selected: bool,
+    interaction_allowed: bool,
+) -> Element<'a, Message> {
     let name = item.name.clone();
     let folder_id = item.id.clone();
     let folder_id_for_export = item.id.clone();
@@ -133,18 +143,23 @@ pub fn folder_row<'a>(item: &FolderItem, selected: bool) -> Element<'a, Message>
             button(text("Export").size(11))
                 .padding([4, 8])
                 .style(|_theme, status| theme::secondary_button(status))
-                .on_press(Message::ExportFolder(folder_id_for_export)),
+                .on_press_maybe(
+                    interaction_allowed.then_some(Message::ExportFolder(folder_id_for_export))
+                ),
             button(text("Rename").size(11))
                 .padding([4, 8])
                 .style(|_theme, status| theme::secondary_button(status))
-                .on_press(Message::OpenRenameDialog(
+                .on_press_maybe(interaction_allowed.then_some(Message::OpenRenameDialog(
                     folder_id_for_rename,
-                    folder_name_for_rename
-                )),
+                    folder_name_for_rename,
+                ))),
             button(text("Delete").size(11))
                 .padding([4, 8])
                 .style(|_theme, status| theme::danger_button(status))
-                .on_press(Message::RequestDeleteFolder(folder_id_for_delete)),
+                .on_press_maybe(
+                    interaction_allowed
+                        .then_some(Message::RequestDeleteFolder(folder_id_for_delete))
+                ),
         ]
         .spacing(4)
         .width(Length::Fixed(180.0)),
@@ -162,7 +177,15 @@ pub fn folder_row<'a>(item: &FolderItem, selected: bool) -> Element<'a, Message>
         .into()
 }
 
-pub fn file_row<'a>(item: &FileItem, selected: bool) -> Element<'a, Message> {
+/// `interaction_allowed` gates every action button here (Preview/Export/
+/// Delete) — while any job is running or queued, the only live things in the
+/// whole browser are cancelling/removing a job and starting more encrypts
+/// (see `PocketVault::any_job_active`).
+pub fn file_row<'a>(
+    item: &FileItem,
+    selected: bool,
+    interaction_allowed: bool,
+) -> Element<'a, Message> {
     let display_name = item.display_name.clone();
     let modified = item.modified_str.clone();
     let size = item.size_str.clone();
@@ -180,7 +203,9 @@ pub fn file_row<'a>(item: &FileItem, selected: bool) -> Element<'a, Message> {
             button(text("Preview").size(11))
                 .padding([4, 8])
                 .style(|_theme, status| theme::primary_button(status))
-                .on_press(Message::PreviewFile(file_id_for_preview)),
+                .on_press_maybe(
+                    interaction_allowed.then_some(Message::PreviewFile(file_id_for_preview)),
+                ),
         );
     }
 
@@ -188,14 +213,16 @@ pub fn file_row<'a>(item: &FileItem, selected: bool) -> Element<'a, Message> {
         button(text("Export").size(11))
             .padding([4, 8])
             .style(|_theme, status| theme::secondary_button(status))
-            .on_press(Message::ExportFile(file_id_for_export)),
+            .on_press_maybe(interaction_allowed.then_some(Message::ExportFile(file_id_for_export))),
     );
 
     actions = actions.push(
         button(text("Delete").size(11))
             .padding([4, 8])
             .style(|_theme, status| theme::danger_button(status))
-            .on_press(Message::RequestDeleteFile(file_id_for_delete)),
+            .on_press_maybe(
+                interaction_allowed.then_some(Message::RequestDeleteFile(file_id_for_delete)),
+            ),
     );
 
     let content = row![

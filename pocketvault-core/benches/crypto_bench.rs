@@ -1,10 +1,9 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use pocketvault_core::{
     crypto::{decrypt, derive_key, encrypt, generate_vault_key, KdfParams},
-    pv_format::{read_pv, write_pv, PvMetadata},
+    pv_format::{read_pv, write_pv, JobControl, PvMetadata},
 };
 use std::io::Cursor;
-use std::sync::atomic::AtomicBool;
 
 // ── AES-256-GCM ───────────────────────────────────────────────────────────────
 
@@ -51,7 +50,7 @@ fn bench_pv_file(c: &mut Criterion) {
                     &key,
                     &meta,
                     data.as_slice(),
-                    &AtomicBool::new(false),
+                    &JobControl::default(),
                 )
                 .unwrap();
                 buf
@@ -64,7 +63,7 @@ fn bench_pv_file(c: &mut Criterion) {
             &key,
             &meta,
             data.as_slice(),
-            &AtomicBool::new(false),
+            &JobControl::default(),
         )
         .unwrap();
         group.bench_with_input(BenchmarkId::new("read", size), &size, |b, _| {

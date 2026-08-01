@@ -1,11 +1,13 @@
 use std::collections::HashSet;
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{button, column, container, mouse_area, row, scrollable, stack, text};
+use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Element, Length};
 
 use crate::message::Message;
-use crate::state::{FileItem, FolderItem, FolderTreeRow, PocketVault, Session};
+use crate::state::{
+    eta_label, CancelTarget, FileItem, FolderItem, FolderTreeRow, PocketVault, Session,
+};
 use crate::theme;
 use pocketvault_core::is_previewable;
 
@@ -98,6 +100,23 @@ fn vdivider<'a>() -> Element<'a, Message> {
         .into()
 }
 
+/// One line in the job banner: a status label, optionally a trailing action
+/// button (e.g. "Cancel" for a running job, "Remove" for a queued one).
+fn banner_line<'a>(label: String, action: Option<(&'static str, Message)>) -> Element<'a, Message> {
+    let mut line = row![text(label).size(12).color(theme::text())]
+        .spacing(12)
+        .align_y(Vertical::Center);
+    if let Some((button_label, msg)) = action {
+        line = line.push(
+            button(text(button_label).size(12).color(theme::danger()))
+                .style(|_theme, status| theme::secondary_button(status))
+                .padding([4, 10])
+                .on_press(msg),
+        );
+    }
+    line.into()
+}
+
 pub fn view(app: &PocketVault) -> Element<'_, Message> {
     let session = match &app.session {
         Some(s) => s,
@@ -119,7 +138,13 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
         }
     };
 
-    let busy = app.active_job.is_some();
+    // While any job is running or queued, everything is locked down except:
+    // cancelling the running job, removing a queued one, and starting more
+    // encrypt jobs (queueing is the whole point of the queue). That includes
+    // Export/Preview even though they're read-only — a single, easy "the app
+    // is busy" state is simpler than tracking which actions are technically
+    // safe to allow.
+    let interaction_allowed = !app.any_job_active();
 
     // ── Toolbar ──────────────────────────────────────────────────────
     let toolbar = container(
@@ -135,15 +160,15 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
                 button(row![text("+").size(16), text("Encrypt Files").size(12)].spacing(4))
                     .padding([6, 12])
                     .style(|_theme, status| theme::primary_button(status))
-                    .on_press_maybe((!busy).then_some(Message::EncryptFilesClicked)),
+                    .on_press(Message::EncryptFilesClicked),
                 button(row![text("📁").size(13), text("Encrypt Folder").size(12)].spacing(4))
                     .padding([6, 12])
                     .style(|_theme, status| theme::primary_button(status))
-                    .on_press_maybe((!busy).then_some(Message::EncryptFolderClicked)),
+                    .on_press(Message::EncryptFolderClicked),
                 button(row![text("📁").size(13), text("New Folder").size(12)].spacing(4))
                     .padding([6, 12])
                     .style(|_theme, status| theme::secondary_button(status))
-                    .on_press_maybe((!busy).then_some(Message::OpenNewFolderDialog)),
+                    .on_press_maybe(interaction_allowed.then_some(Message::OpenNewFolderDialog)),
             ]
             .spacing(8)
             .width(Length::Fill),
@@ -189,7 +214,7 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
                 folder_id.is_none(),
                 false,
                 false,
-                Message::NavigateFolder(None),
+                Some(Message::NavigateFolder(None)),
                 None,
             ),
             container(column![]).height(Length::Fixed(8.0)),
@@ -203,7 +228,7 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
                 false,
                 false,
                 false,
-                Message::ShowChangePasswordScreen,
+                interaction_allowed.then_some(Message::ShowChangePasswordScreen),
                 None,
             ),
             sidebar_item(
@@ -212,7 +237,7 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
                 false,
                 true,
                 false,
-                Message::LockVault,
+                Some(Message::LockVault),
                 None,
             ),
         ]
@@ -290,7 +315,7 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
         );
         for f in &folders {
             let selected = app.selected_id == f.id;
-            list = list.push(folder_row(f, selected));
+            list = list.push(folder_row(f, selected, interaction_allowed));
         }
     }
 
@@ -309,7 +334,7 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
         );
         for f in &files {
             let selected = app.selected_id == f.id;
-            list = list.push(file_row(f, selected));
+            list = list.push(file_row(f, selected, interaction_allowed));
         }
     }
 
@@ -341,53 +366,59 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
     .width(Length::Fill)
     .style(theme::container_with_bg(theme::path_bar_bg()));
 
-    // ── Job banner + busy scrim ────────────────────────────────────────
-    let browser_body: Element<Message> = row![sidebar, vdivider(), content]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into();
+    // ── Job banner ───────────────────────────────────────────────────
+    // No full-screen dimming — the browser is locked down via
+    // `interaction_allowed` above instead. This banner is the "what's
+    // happening" list: the running job with a live ETA + Cancel, every
+    // queued job with its own Remove, and the delete/export jobs (delete has
+    // no Cancel — an unlinked file can't be undone).
+    let mut banner_lines: Vec<Element<Message>> = Vec::new();
 
-    let browser_body = if app.active_job.is_some() {
-        let scrim = mouse_area(
-            container(column![])
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(theme::scrim_container),
-        )
-        .on_press(Message::Ignore);
-        stack![browser_body, scrim].into()
-    } else {
-        browser_body
-    };
+    if let Some(job) = &app.running_encrypt {
+        let status = if job.cancelling {
+            "Cancelling…".to_string()
+        } else {
+            format!("Encrypting {} — {}", job.label, eta_label(job))
+        };
+        let action = (!job.cancelling)
+            .then_some(("Cancel", Message::RequestCancelJob(CancelTarget::Encrypt)));
+        banner_lines.push(banner_line(status, action));
+    }
+    for queued in &app.encrypt_queue {
+        banner_lines.push(banner_line(
+            format!("{} — waiting", queued.label),
+            Some(("Remove", Message::RemoveQueuedJob(queued.id))),
+        ));
+    }
+    if let Some(job) = &app.active_delete_job {
+        banner_lines.push(banner_line(format!("Deleting {}…", job.label), None));
+    }
+    if let Some(job) = &app.active_export_job {
+        let status = if job.cancelling {
+            "Cancelling export…".to_string()
+        } else {
+            format!("Exporting {}…", job.label)
+        };
+        let action = (!job.cancelling)
+            .then_some(("Cancel", Message::RequestCancelJob(CancelTarget::Export)));
+        banner_lines.push(banner_line(status, action));
+    }
 
     let mut layout = column![toolbar, divider()];
 
-    if let Some(job) = &app.active_job {
-        let status = if job.cancelling {
-            "Cancelling…"
-        } else {
-            job.label.as_str()
-        };
-        let mut banner_row = row![text(format!("⏳ {status}")).size(12).color(theme::text())]
-            .spacing(12)
-            .padding([8, 16])
-            .align_y(Vertical::Center);
-        if job.cancel.is_some() && !job.cancelling {
-            banner_row = banner_row.push(
-                button(text("Cancel").size(12).color(theme::danger()))
-                    .style(|_theme, status| theme::secondary_button(status))
-                    .padding([4, 10])
-                    .on_press(Message::RequestCancelJob),
-            );
-        }
-        let banner = container(banner_row)
+    if !banner_lines.is_empty() {
+        let banner = container(column(banner_lines).spacing(4).padding([8, 16]))
             .width(Length::Fill)
             .style(theme::container_with_bg(theme::folder_band_bg()));
         layout = layout.push(banner).push(divider());
     }
 
     layout
-        .push(browser_body)
+        .push(
+            row![sidebar, vdivider(), content]
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
         .push(divider())
         .push(path_bar)
         .width(Length::Fill)

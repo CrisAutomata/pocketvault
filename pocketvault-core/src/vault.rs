@@ -1,7 +1,8 @@
 use std::{
     fs,
+    io::{BufReader, BufWriter, Write},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::Ordering,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -11,7 +12,7 @@ use crate::{
     crypto::VaultKey,
     error::{Result, VaultError},
     meta::{VaultFileEntry, VaultFolder, VaultMeta},
-    pv_format::{read_pv, read_pv_body, read_pv_metadata, write_pv, PvMetadata},
+    pv_format::{read_pv, read_pv_body, read_pv_metadata, write_pv, JobControl, PvMetadata},
 };
 
 #[derive(Debug, Clone)]
@@ -77,9 +78,16 @@ impl Vault {
     // ── Folder operations ────────────────────────────────────────────────────
 
     pub fn create_folder(&mut self, name: &str, parent_id: Option<&str>) -> Result<String> {
-        let id = self.meta.add_folder(name, parent_id);
+        let id = self.create_folder_inner(name, parent_id);
         self.save()?;
         Ok(id)
+    }
+
+    /// Same as `create_folder` but without the persist — used by batch/recursive
+    /// callers (`encrypt_folder_contents`) that save once at the end of the whole
+    /// operation instead of once per subfolder created.
+    fn create_folder_inner(&mut self, name: &str, parent_id: Option<&str>) -> String {
+        self.meta.add_folder(name, parent_id)
     }
 
     pub fn rename_folder(&mut self, folder_id: &str, new_name: &str) -> Result<()> {
@@ -120,7 +128,24 @@ impl Vault {
         source: &Path,
         folder_id: Option<&str>,
         key: &VaultKey,
-        cancel: &AtomicBool,
+        control: &JobControl,
+    ) -> Result<String> {
+        let id = self.encrypt_file_inner(source, folder_id, key, control)?;
+        self.save()?;
+        Ok(id)
+    }
+
+    /// Same as `encrypt_file` but without the persist — used by batch/recursive
+    /// callers (`encrypt_files`, `encrypt_folder_contents`) that save once at the
+    /// end of the whole operation instead of once per file. Rewriting the entire
+    /// vault.meta JSON after every single file was the dominant cost — and the
+    /// source of wildly wrong ETA estimates — for folders with many files.
+    fn encrypt_file_inner(
+        &mut self,
+        source: &Path,
+        folder_id: Option<&str>,
+        key: &VaultKey,
+        control: &JobControl,
     ) -> Result<String> {
         let filename = source
             .file_name()
@@ -149,49 +174,56 @@ impl Vault {
         // Streams the source through in fixed-size chunks (see `write_pv`)
         // instead of reading the whole file into memory first — a multi-GB
         // import previously allocated a same-sized `Vec<u8>` up front, which
-        // could exhaust memory and abort the process.
-        let source_file = fs::File::open(source)?;
-        let mut file = fs::File::create(&pv_path)?;
-        if let Err(e) = write_pv(&mut file, key, &pv_meta, source_file, cancel) {
+        // could exhaust memory and abort the process. Buffered so each
+        // chunk's 3 small writes (nonce, length, ciphertext) don't each cost
+        // a separate write syscall.
+        let source_file = BufReader::new(fs::File::open(source)?);
+        let mut file = BufWriter::new(fs::File::create(&pv_path)?);
+        let write_result = write_pv(&mut file, key, &pv_meta, source_file, control)
+            .and_then(|()| file.flush().map_err(VaultError::from));
+        if let Err(e) = write_result {
             drop(file);
             let _ = fs::remove_file(&pv_path); // no partial .pv left behind on cancel/error
             return Err(e);
         }
 
         let id = self.meta.add_file(&pv_filename, folder_id);
-        self.save()?;
 
         Ok(id)
     }
 
     /// Encrypts every path in `paths` into `folder_id` as one all-or-nothing
     /// batch: if any file fails (including cancellation), every file already
-    /// added earlier in this same batch is rolled back via `delete_file`.
+    /// added earlier in this same batch is rolled back. Persists once at the
+    /// end (success or rollback) rather than once per file.
     pub fn encrypt_files(
         &mut self,
         paths: &[PathBuf],
         folder_id: Option<&str>,
         key: &VaultKey,
-        cancel: &AtomicBool,
+        control: &JobControl,
     ) -> Result<Vec<String>> {
         let mut ids: Vec<String> = Vec::new();
         for path in paths {
-            if cancel.load(Ordering::Relaxed) {
+            if control.cancel.load(Ordering::Relaxed) {
                 for id in &ids {
-                    let _ = self.delete_file(id);
+                    let _ = self.delete_file_inner(id);
                 }
+                let _ = self.save();
                 return Err(VaultError::Cancelled);
             }
-            match self.encrypt_file(path, folder_id, key, cancel) {
+            match self.encrypt_file_inner(path, folder_id, key, control) {
                 Ok(id) => ids.push(id),
                 Err(e) => {
                     for id in &ids {
-                        let _ = self.delete_file(id);
+                        let _ = self.delete_file_inner(id);
                     }
+                    let _ = self.save();
                     return Err(e);
                 }
             }
         }
+        self.save()?;
         Ok(ids)
     }
 
@@ -207,36 +239,46 @@ impl Vault {
         source_dir: &Path,
         parent_folder_id: Option<&str>,
         key: &VaultKey,
-        cancel: &AtomicBool,
+        control: &JobControl,
     ) -> Result<Vec<String>> {
         let name = source_dir
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| VaultError::FileNotFound(source_dir.to_string_lossy().to_string()))?;
-        let folder_id = self.create_folder(name, parent_folder_id)?;
+        let folder_id = self.create_folder_inner(name, parent_folder_id);
 
-        match self.encrypt_folder_contents(source_dir, &folder_id, key, cancel) {
-            Ok(ids) => Ok(ids),
+        match self.encrypt_folder_contents(source_dir, &folder_id, key, control) {
+            Ok(ids) => {
+                self.save()?;
+                Ok(ids)
+            }
             Err(e) => {
+                // `delete_folder` persists its own rollback in a single save, so
+                // the in-memory adds made by `encrypt_folder_contents` (which,
+                // like `encrypt_files`, doesn't save per-entry) still end up
+                // correctly reverted on disk here.
                 let _ = self.delete_folder(&folder_id);
                 Err(e)
             }
         }
     }
 
+    /// Recurses without persisting — `encrypt_folder` saves once for the whole
+    /// subtree (success) or relies on `delete_folder`'s single save (failure),
+    /// instead of rewriting vault.meta after every file and every subfolder.
     fn encrypt_folder_contents(
         &mut self,
         source_dir: &Path,
         folder_id: &str,
         key: &VaultKey,
-        cancel: &AtomicBool,
+        control: &JobControl,
     ) -> Result<Vec<String>> {
         let mut entries: Vec<_> = fs::read_dir(source_dir)?.filter_map(|e| e.ok()).collect();
         entries.sort_by_key(|e| e.file_name());
 
         let mut file_ids = Vec::new();
         for entry in entries {
-            if cancel.load(Ordering::Relaxed) {
+            if control.cancel.load(Ordering::Relaxed) {
                 return Err(VaultError::Cancelled);
             }
             let path = entry.path();
@@ -245,16 +287,25 @@ impl Vault {
                     .file_name()
                     .and_then(|n| n.to_str())
                     .ok_or_else(|| VaultError::FileNotFound(path.to_string_lossy().to_string()))?;
-                let sub_id = self.create_folder(sub_name, Some(folder_id))?;
-                file_ids.extend(self.encrypt_folder_contents(&path, &sub_id, key, cancel)?);
+                let sub_id = self.create_folder_inner(sub_name, Some(folder_id));
+                file_ids.extend(self.encrypt_folder_contents(&path, &sub_id, key, control)?);
             } else if path.is_file() {
-                file_ids.push(self.encrypt_file(&path, Some(folder_id), key, cancel)?);
+                file_ids.push(self.encrypt_file_inner(&path, Some(folder_id), key, control)?);
             }
         }
         Ok(file_ids)
     }
 
     pub fn delete_file(&mut self, file_id: &str) -> Result<()> {
+        self.delete_file_inner(file_id)?;
+        self.save()?;
+        Ok(())
+    }
+
+    /// Same as `delete_file` but without the persist — used by `encrypt_files`'s
+    /// rollback path, which saves once after the whole rollback instead of once
+    /// per file removed.
+    fn delete_file_inner(&mut self, file_id: &str) -> Result<()> {
         let entry = self
             .meta
             .remove_file(file_id)
@@ -264,7 +315,6 @@ impl Vault {
         if path.exists() {
             fs::remove_file(path)?;
         }
-        self.save()?;
         Ok(())
     }
 
@@ -273,7 +323,7 @@ impl Vault {
         file_id: &str,
         dest_dir: &Path,
         key: &VaultKey,
-        cancel: &AtomicBool,
+        control: &JobControl,
     ) -> Result<PathBuf> {
         let entry = self
             .meta
@@ -282,14 +332,18 @@ impl Vault {
             .find(|f| f.id == file_id)
             .ok_or_else(|| VaultError::FileNotFound(file_id.to_string()))?;
 
-        let mut f = fs::File::open(self.pv_path(&entry.pv_filename))?;
+        let mut f = BufReader::new(fs::File::open(self.pv_path(&entry.pv_filename))?);
         let meta = read_pv_metadata(&mut f, key)?;
 
         let dest = dest_dir.join(&meta.original_name);
         // Streams decrypted chunks straight to disk instead of buffering the
         // whole plaintext in memory first (same rationale as `encrypt_file`).
-        let mut out = fs::File::create(&dest)?;
-        if let Err(e) = read_pv_body(&mut f, key, &mut out, cancel) {
+        // Buffered on both sides so each chunk's several small reads/writes
+        // don't each cost a separate syscall.
+        let mut out = BufWriter::new(fs::File::create(&dest)?);
+        let read_result = read_pv_body(&mut f, key, &mut out, control)
+            .and_then(|()| out.flush().map_err(VaultError::from));
+        if let Err(e) = read_result {
             drop(out);
             let _ = fs::remove_file(&dest); // no partial export left behind on cancel/error
             return Err(e);
@@ -309,7 +363,7 @@ impl Vault {
         folder_id: &str,
         dest_dir: &Path,
         key: &VaultKey,
-        cancel: &AtomicBool,
+        control: &JobControl,
     ) -> Result<PathBuf> {
         let folder = self
             .meta
@@ -321,7 +375,7 @@ impl Vault {
         let out_dir = dest_dir.join(&folder.name);
         fs::create_dir_all(&out_dir)?;
 
-        match self.export_folder_contents(folder_id, &out_dir, key, cancel) {
+        match self.export_folder_contents(folder_id, &out_dir, key, control) {
             Ok(()) => Ok(out_dir),
             Err(e) => {
                 let _ = fs::remove_dir_all(&out_dir);
@@ -335,19 +389,19 @@ impl Vault {
         folder_id: &str,
         out_dir: &Path,
         key: &VaultKey,
-        cancel: &AtomicBool,
+        control: &JobControl,
     ) -> Result<()> {
         for file in self.meta.files_in_folder(Some(folder_id)) {
-            if cancel.load(Ordering::Relaxed) {
+            if control.cancel.load(Ordering::Relaxed) {
                 return Err(VaultError::Cancelled);
             }
-            self.export_file(&file.id, out_dir, key, cancel)?;
+            self.export_file(&file.id, out_dir, key, control)?;
         }
         for sub in self.meta.subfolders(Some(folder_id)) {
-            if cancel.load(Ordering::Relaxed) {
+            if control.cancel.load(Ordering::Relaxed) {
                 return Err(VaultError::Cancelled);
             }
-            self.export_folder(&sub.id, out_dir, key, cancel)?;
+            self.export_folder(&sub.id, out_dir, key, control)?;
         }
         Ok(())
     }
@@ -372,7 +426,7 @@ impl Vault {
             .find(|f| f.id == file_id)
             .ok_or_else(|| VaultError::FileNotFound(file_id.to_string()))?;
 
-        let mut f = fs::File::open(self.pv_path(&entry.pv_filename))?;
+        let mut f = BufReader::new(fs::File::open(self.pv_path(&entry.pv_filename))?);
         read_pv(&mut f, key)
     }
 
@@ -438,6 +492,7 @@ pub fn is_previewable(mime: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
     use tempfile::TempDir;
 
     fn make_vault(dir: &Path) -> Vault {
@@ -452,6 +507,13 @@ mod tests {
         let path = dir.join(name);
         fs::write(&path, data).unwrap();
         path
+    }
+
+    fn cancelled_control() -> JobControl {
+        JobControl {
+            cancel: AtomicBool::new(true),
+            ..JobControl::default()
+        }
     }
 
     // ── Create / open ────────────────────────────────────────────────────
@@ -504,13 +566,13 @@ mod tests {
         let path = write_temp(src.path(), "notes.txt", original);
 
         let fid = v
-            .encrypt_file(&path, None, &key, &AtomicBool::new(false))
+            .encrypt_file(&path, None, &key, &JobControl::default())
             .unwrap();
         assert_eq!(v.meta.files.len(), 1);
 
         let export_dir = TempDir::new().unwrap();
         let out = v
-            .export_file(&fid, export_dir.path(), &key, &AtomicBool::new(false))
+            .export_file(&fid, export_dir.path(), &key, &JobControl::default())
             .unwrap();
         assert_eq!(fs::read(&out).unwrap(), original);
     }
@@ -523,7 +585,7 @@ mod tests {
         let src = TempDir::new().unwrap();
         let path = write_temp(src.path(), "secret.txt", b"data");
 
-        v.encrypt_file(&path, None, &key, &AtomicBool::new(false))
+        v.encrypt_file(&path, None, &key, &JobControl::default())
             .unwrap();
 
         let pv_name = &v.meta.files[0].pv_filename;
@@ -540,7 +602,7 @@ mod tests {
         let path = write_temp(src.path(), "photo.jpg", b"JFIF");
 
         let fid = v
-            .encrypt_file(&path, None, &key, &AtomicBool::new(false))
+            .encrypt_file(&path, None, &key, &JobControl::default())
             .unwrap();
         let meta = v.read_metadata(&fid, &key).unwrap();
 
@@ -560,11 +622,11 @@ mod tests {
         let path = write_temp(src.path(), "big.bin", &data);
 
         let fid = v
-            .encrypt_file(&path, None, &key, &AtomicBool::new(false))
+            .encrypt_file(&path, None, &key, &JobControl::default())
             .unwrap();
         let export = TempDir::new().unwrap();
         let out = v
-            .export_file(&fid, export.path(), &key, &AtomicBool::new(false))
+            .export_file(&fid, export.path(), &key, &JobControl::default())
             .unwrap();
         assert_eq!(fs::read(&out).unwrap(), data);
     }
@@ -580,7 +642,7 @@ mod tests {
                 &write_temp(src.path(), "f.txt", b"x"),
                 None,
                 &key,
-                &AtomicBool::new(false),
+                &JobControl::default(),
             )
             .unwrap();
 
@@ -591,7 +653,7 @@ mod tests {
 
         let export = TempDir::new().unwrap();
         assert!(v
-            .export_file(&fid, export.path(), &bad_key, &AtomicBool::new(false))
+            .export_file(&fid, export.path(), &bad_key, &JobControl::default())
             .is_err());
     }
 
@@ -608,7 +670,7 @@ mod tests {
                 &write_temp(src.path(), "f.txt", b"data"),
                 None,
                 &key,
-                &AtomicBool::new(false),
+                &JobControl::default(),
             )
             .unwrap();
 
@@ -634,14 +696,14 @@ mod tests {
             &write_temp(src.path(), "a.jpg", b"img"),
             Some(&folder_id),
             &key,
-            &AtomicBool::new(false),
+            &JobControl::default(),
         )
         .unwrap();
         v.encrypt_file(
             &write_temp(src.path(), "b.txt", b"txt"),
             None,
             &key,
-            &AtomicBool::new(false),
+            &JobControl::default(),
         )
         .unwrap();
 
@@ -668,7 +730,7 @@ mod tests {
         fs::write(root.join("sub").join("nested.txt"), b"nested").unwrap();
 
         let ids = v
-            .encrypt_folder(&root, None, &key, &AtomicBool::new(false))
+            .encrypt_folder(&root, None, &key, &JobControl::default())
             .unwrap();
         assert_eq!(ids.len(), 2); // top.txt + nested.txt, empty_sub contributes none
 
@@ -714,13 +776,13 @@ mod tests {
         fs::write(root.join("top.txt"), b"top").unwrap();
         fs::write(root.join("sub").join("nested.txt"), b"nested").unwrap();
 
-        v.encrypt_folder(&root, None, &key, &AtomicBool::new(false))
+        v.encrypt_folder(&root, None, &key, &JobControl::default())
             .unwrap();
         let photos_id = v.meta.subfolders(None)[0].id.clone();
 
         let export_dir = TempDir::new().unwrap();
         let out_dir = v
-            .export_folder(&photos_id, export_dir.path(), &key, &AtomicBool::new(false))
+            .export_folder(&photos_id, export_dir.path(), &key, &JobControl::default())
             .unwrap();
 
         assert_eq!(out_dir, export_dir.path().join("Photos"));
@@ -756,7 +818,7 @@ mod tests {
                 &src.path().join("level1"),
                 None,
                 &key,
-                &AtomicBool::new(false),
+                &JobControl::default(),
             )
             .unwrap();
         assert_eq!(ids.len(), 1);
@@ -774,7 +836,7 @@ mod tests {
 
         let export_dir = TempDir::new().unwrap();
         let out = v
-            .export_file(&ids[0], export_dir.path(), &key, &AtomicBool::new(false))
+            .export_file(&ids[0], export_dir.path(), &key, &JobControl::default())
             .unwrap();
         assert_eq!(fs::read(out).unwrap(), b"buried treasure");
     }
@@ -795,7 +857,7 @@ mod tests {
             write_temp(src.path(), "c.txt", b"CCC"),
         ];
         let ids = v
-            .encrypt_files(&paths, None, &key, &AtomicBool::new(false))
+            .encrypt_files(&paths, None, &key, &JobControl::default())
             .unwrap();
 
         assert_eq!(v.meta.files.len(), 3);
@@ -818,7 +880,7 @@ mod tests {
         let path = write_temp(src.path(), "f.txt", b"data");
 
         let err = v
-            .encrypt_file(&path, None, &key, &AtomicBool::new(true))
+            .encrypt_file(&path, None, &key, &cancelled_control())
             .unwrap_err();
         assert!(matches!(err, VaultError::Cancelled));
 
@@ -840,7 +902,7 @@ mod tests {
         ];
 
         let err = v
-            .encrypt_files(&paths, None, &key, &AtomicBool::new(false))
+            .encrypt_files(&paths, None, &key, &JobControl::default())
             .unwrap_err();
         assert!(matches!(err, VaultError::Io(_)));
 
@@ -862,7 +924,7 @@ mod tests {
         fs::write(root.join("top.txt"), b"top").unwrap();
 
         let err = v
-            .encrypt_folder(&root, None, &key, &AtomicBool::new(true))
+            .encrypt_folder(&root, None, &key, &cancelled_control())
             .unwrap_err();
         assert!(matches!(err, VaultError::Cancelled));
 
@@ -882,13 +944,13 @@ mod tests {
                 &write_temp(src.path(), "f.txt", b"data"),
                 None,
                 &key,
-                &AtomicBool::new(false),
+                &JobControl::default(),
             )
             .unwrap();
 
         let export_dir = TempDir::new().unwrap();
         let err = v
-            .export_file(&fid, export_dir.path(), &key, &AtomicBool::new(true))
+            .export_file(&fid, export_dir.path(), &key, &cancelled_control())
             .unwrap_err();
         assert!(matches!(err, VaultError::Cancelled));
         assert!(!export_dir.path().join("f.txt").exists());
@@ -904,13 +966,13 @@ mod tests {
         let root = src.path().join("Photos");
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("top.txt"), b"top").unwrap();
-        v.encrypt_folder(&root, None, &key, &AtomicBool::new(false))
+        v.encrypt_folder(&root, None, &key, &JobControl::default())
             .unwrap();
         let photos_id = v.meta.subfolders(None)[0].id.clone();
 
         let export_dir = TempDir::new().unwrap();
         let err = v
-            .export_folder(&photos_id, export_dir.path(), &key, &AtomicBool::new(true))
+            .export_folder(&photos_id, export_dir.path(), &key, &cancelled_control())
             .unwrap_err();
         assert!(matches!(err, VaultError::Cancelled));
         assert!(!export_dir.path().join("Photos").exists());
