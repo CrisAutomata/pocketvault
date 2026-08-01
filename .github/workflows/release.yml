@@ -1,21 +1,35 @@
 name: Release
 
-# Builds and publishes a GitHub Release whenever a version tag is pushed.
-# Use tags like v0.1.0, v0.1.1, etc. to create releases.
-# git tag v0.1.1
-# git push origin v0.1.1
+# Summary of the workflow:
+# 1. Trigger: this workflow runs when a version tag like v0.1.0 is pushed,
+#    or when you manually run it from the GitHub Actions UI.
+# 2. Build: it compiles the app separately for Windows, Linux, and macOS.
+# 3. Assemble: it collects the built binaries into packaged release assets.
+# 4. Release: it checks that the tag matches the version in Cargo.toml and
+#    publishes a GitHub Release with those assets.
+
+# This workflow is a GitHub Actions pipeline.
+# A pipeline is a set of automated jobs that run in order when certain events happen.
+# In this file, the event is a Git tag push or manual trigger.
+
+# Trigger section: tells GitHub when to run the workflow.
 on:
   push:
     tags:
-      - 'v*'
-  workflow_dispatch:
+      - 'v*'   # Run only for tags that start with v, such as v0.1.0
+  workflow_dispatch:  # Allow manual run from the GitHub Actions tab
 
+# Permissions section: defines what the workflow is allowed to do.
+# contents: write means the workflow can create a GitHub Release and upload assets.
 permissions:
   contents: write
 
 jobs:
+  # Job = one unit of work in the workflow.
+  # The build job runs on multiple operating systems in parallel.
   build:
     strategy:
+      # fail-fast: false means if one platform build fails, the others still continue.
       fail-fast: false
       matrix:
         include:
@@ -29,18 +43,26 @@ jobs:
             target_name: pocketvault
             artifact_name: macos
 
+    # runs-on selects the virtual machine image for this job.
+    # The matrix makes this job run 3 times, once per OS.
     runs-on: ${{ matrix.os }}
 
     steps:
+      # Step = one action or command inside a job.
+      # uses = run a prebuilt GitHub Action from the marketplace or GitHub.
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # Installs Rust so cargo can build the project.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # Caches Cargo dependencies to make future builds faster.
       - name: Cache cargo registry and build output
         uses: Swatinem/rust-cache@v2
 
+      # This step only runs on Ubuntu because Linux GUI libraries are needed.
+      # run = execute shell commands in the job environment.
       - name: Install Linux GUI dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -56,9 +78,12 @@ jobs:
             libgl1-mesa-dev \
             pkg-config
 
+      # Build the desktop app in release mode.
       - name: Build release binary
         run: cargo build --release -p pocketvault-desktop
 
+      # Upload the compiled binary as an artifact so later jobs can use it.
+      # Artifact = a temporary file bundle passed between jobs.
       - name: Upload built binary
         uses: actions/upload-artifact@v4
         with:
@@ -66,7 +91,8 @@ jobs:
           path: target/release/${{ matrix.target_name }}
           retention-days: 3
 
-
+  # assemble job depends on build.
+  # needs: build means this job waits until the build job completes.
   assemble:
     needs: build
     runs-on: ubuntu-latest
@@ -74,6 +100,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # Download each platform artifact created by the build job.
       - name: Download windows artifact
         uses: actions/download-artifact@v4
         with:
@@ -92,12 +119,14 @@ jobs:
           name: pocketvault-macos
           path: artifacts/macos
 
+      # This shell script collects the downloaded binaries and packages them.
+      # It uses basic Linux shell commands like mkdir, cp, zip, tar, and mv.
       - name: Create combined packages
         run: |
           set -e
           mkdir -p release-assets pkg
 
-          # Map downloaded artifact folders to release-assets (deterministic)
+          # Copy each downloaded binary into a release-assets folder.
           if [ -d artifacts/windows ]; then
             f=$(ls -1 artifacts/windows | head -n1 || true)
             if [ -n "$f" ]; then
@@ -119,12 +148,12 @@ jobs:
             fi
           fi
 
-          # Prepare pkg with consistent internal filenames
+          # Put the files into a temporary pkg folder with consistent names.
           cp release-assets/pocketvault-windows-x86_64.exe pkg/pocketvault.exe || true
           cp release-assets/pocketvault-linux-x86_64 pkg/pocketvault || true
           cp release-assets/pocketvault-macos-x86_64 pkg/pocketvault-macos || true
 
-          # Create platform archives that each contain all three executables
+          # Create zip/tar archives containing the binaries.
           zip -j pocketvault-windows-x86_64.zip pkg/pocketvault.exe pkg/pocketvault pkg/pocketvault-macos || true
           tar -C pkg -czf pocketvault-linux-x86_64.tar.gz pocketvault pocketvault.exe pocketvault-macos || true
           tar -C pkg -czf pocketvault-macos-x86_64.tar.gz pocketvault pocketvault.exe pocketvault-macos || true
@@ -132,6 +161,7 @@ jobs:
           mv pocketvault-*.zip pocketvault-*.tar.gz release-assets/ || true
           ls -la release-assets
 
+      # Save the assembled release files as a new artifact for the next job.
       - name: Upload combined packages
         uses: actions/upload-artifact@v4
         with:
@@ -139,14 +169,19 @@ jobs:
           path: release-assets/
           retention-days: 3
 
-
+  # release job depends on assemble.
+  # This job only runs for real tag pushes, not for manual branch runs.
   release:
+    if: startsWith(github.ref, 'refs/tags/')
     needs: assemble
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # This step reads the version from Cargo.toml and confirms the Git tag matches it.
+      # GITHUB_REF is the current tag ref, such as refs/tags/v0.1.0.
+      # GITHUB_OUTPUT lets a step pass data to later steps.
       - name: Read version from Cargo.toml and validate tag
         id: version
         run: |
@@ -158,12 +193,14 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      # Download the packaged assets from the previous job.
       - name: Download combined packages
         uses: actions/download-artifact@v4
         with:
           name: combined-packages
           path: release-assets
 
+      # Create the actual GitHub Release page and attach the files.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
