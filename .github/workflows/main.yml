@@ -21,9 +21,6 @@ name: Main
 # that bypass permission; add it as a repository secret.
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
     branches:
       - main
