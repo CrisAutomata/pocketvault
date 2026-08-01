@@ -57,26 +57,15 @@ jobs:
       - name: Build release binary
         run: cargo build --release -p pocketvault-desktop
 
-      - name: Package (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          Compress-Archive -Path "target/release/${{ matrix.target_name }}" -DestinationPath "${{ matrix.asset_name }}"
-
-      - name: Package (Linux/macOS)
-        if: matrix.os != 'windows-latest'
-        run: |
-          tar -czf "${{ matrix.asset_name }}" -C target/release "${{ matrix.target_name }}"
-
-      - name: Upload build artifact
+      - name: Upload built binary
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}
+          name: ${{ matrix.os }}
+          path: target/release/${{ matrix.target_name }}
           retention-days: 7
 
   release:
-    needs: build
+    needs: assemble
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -106,3 +95,60 @@ jobs:
           name: PocketVault v${{ steps.version.outputs.version }}
           files: release-assets/*
           generate_release_notes: true
+  assemble:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download built binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create combined packages
+        run: |
+          set -e
+          mkdir -p release-assets pkg
+
+          # For each downloaded artifact subdir, pick its first file and map by platform
+          for d in artifacts/*; do
+            name=$(basename "$d")
+            if [ -d "$d" ]; then
+              f=$(ls -1 "$d" | head -n1 || true)
+              if [ -n "$f" ]; then
+                src="$d/$f"
+                if [[ "$name" == *windows* ]]; then
+                  cp "$src" release-assets/pocketvault-windows-x86_64.exe || true
+                elif [[ "$name" == *ubuntu* || "$name" == *linux* ]]; then
+                  cp "$src" release-assets/pocketvault-linux-x86_64 || true
+                elif [[ "$name" == *macos* ]]; then
+                  cp "$src" release-assets/pocketvault-macos-x86_64 || true
+                else
+                  # fallback: copy with artifact name prefix
+                  cp "$src" "release-assets/${name}_$(basename $f)" || true
+                fi
+              fi
+            fi
+          done
+
+          # Prepare pkg with consistent internal filenames
+          cp release-assets/pocketvault-windows-x86_64.exe pkg/pocketvault.exe || true
+          cp release-assets/pocketvault-linux-x86_64 pkg/pocketvault || true
+          cp release-assets/pocketvault-macos-x86_64 pkg/pocketvault-macos || true
+
+          # Create platform archives that each contain all three executables
+          zip -j pocketvault-windows-x86_64.zip pkg/pocketvault.exe pkg/pocketvault pkg/pocketvault-macos || true
+          tar -C pkg -czf pocketvault-linux-x86_64.tar.gz pocketvault pocketvault.exe pocketvault-macos || true
+          tar -C pkg -czf pocketvault-macos-x86_64.tar.gz pocketvault pocketvault.exe pocketvault-macos || true
+
+          mv pocketvault-*.zip pocketvault-*.tar.gz release-assets/ || true
+          ls -la release-assets
+
+      - name: Upload combined packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: combined-packages
+          path: release-assets/
+          retention-days: 7
