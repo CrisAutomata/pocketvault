@@ -1,12 +1,12 @@
 name: Release
 
-# Builds and publishes a GitHub Release whenever the `release` branch is
-# updated. Feature/development work should happen on other branches; only
-# pushes that land on `release` (e.g. via a merged PR) trigger a build.
+# Builds and publishes a GitHub Release whenever a version tag is pushed.
+# Use tags like v0.1.0, v0.1.1, etc. to create releases.
 on:
   push:
-    branches:
-      - release
+    tags:
+      - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -19,13 +19,10 @@ jobs:
         include:
           - os: windows-latest
             target_name: pocketvault.exe
-            asset_name: pocketvault-windows-x86_64.zip
           - os: ubuntu-latest
             target_name: pocketvault
-            asset_name: pocketvault-linux-x86_64.tar.gz
           - os: macos-latest
             target_name: pocketvault
-            asset_name: pocketvault-macos-x86_64.tar.gz
 
     runs-on: ${{ matrix.os }}
 
@@ -64,37 +61,7 @@ jobs:
           path: target/release/${{ matrix.target_name }}
           retention-days: 7
 
-  release:
-    needs: assemble
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
 
-      - name: Read version from Cargo.toml
-        id: version
-        run: |
-          version=$(grep '^version' pocketvault-desktop/Cargo.toml | head -1 | sed -E 's/version = "(.*)"/\1/')
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Flatten artifact directory
-        run: |
-          mkdir -p release-assets
-          find artifacts -type f -exec cp {} release-assets/ \;
-          ls -la release-assets
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: PocketVault v${{ steps.version.outputs.version }}
-          files: release-assets/*
-          generate_release_notes: true
   assemble:
     needs: build
     runs-on: ubuntu-latest
@@ -152,3 +119,36 @@ jobs:
           name: combined-packages
           path: release-assets/
           retention-days: 7
+
+
+  release:
+    needs: assemble
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Read version from Cargo.toml and validate tag
+        id: version
+        run: |
+          version=$(grep '^version' pocketvault-desktop/Cargo.toml | head -1 | sed -E 's/version = "(.*)"/\1/')
+          tag=${GITHUB_REF#refs/tags/}
+          if [ "v$version" != "$tag" ]; then
+            echo "Tag name ($tag) does not match Cargo.toml version (v$version)"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download combined packages
+        uses: actions/download-artifact@v4
+        with:
+          name: combined-packages
+          path: release-assets
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: PocketVault ${{ github.ref_name }}
+          files: release-assets/*
+          generate_release_notes: true
