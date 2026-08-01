@@ -121,3 +121,5 @@ cargo bench -p pocketvault-core
 ## Releasing
 
 Pushing to a branch named `release` triggers `.github/workflows/release.yml`, which builds Windows/Linux/macOS binaries and publishes a GitHub Release tagged with whatever version is in `pocketvault-desktop/Cargo.toml`. Bump that version before merging to `release` to cut a new release.
+
+See `RELEASE.md` for a complete step-by-step guide and recommended release practice.
