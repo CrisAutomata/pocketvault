@@ -2,6 +2,8 @@ name: Release
 
 # Builds and publishes a GitHub Release whenever a version tag is pushed.
 # Use tags like v0.1.0, v0.1.1, etc. to create releases.
+# git tag v0.1.1
+# git push origin v0.1.1
 on:
   push:
     tags:
