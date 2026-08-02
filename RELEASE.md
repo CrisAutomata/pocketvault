@@ -91,3 +91,20 @@ That lets anyone open the archive and use the executable for their platform.
 - The release workflow is currently triggered by pushes to the `release` branch.
 - The version must be bumped in `pocketvault-desktop/Cargo.toml` before merging to `release`.
 - If you want, this workflow can be updated later to use git tags instead of a dedicated release branch.
+
+So the usual flow is:
+
+Commit the fix
+Bump the version in Cargo.toml
+Push to main
+Create a new tag, for example v0.1.5
+Example:
+
+
+## COmon
+git add pocketvault-desktop/Cargo.toml
+git commit -m "Fix release workflow build issue"
+git push origin main
+
+git tag v0.1.5
+git push origin v0.1.5
