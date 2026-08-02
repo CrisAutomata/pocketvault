@@ -151,12 +151,37 @@ jobs:
           # Put the files into a temporary pkg folder with consistent names.
           cp release-assets/pocketvault-windows-x86_64.exe pkg/pocketvault.exe || true
           cp release-assets/pocketvault-linux-x86_64 pkg/pocketvault || true
-          cp release-assets/pocketvault-macos-x86_64 pkg/pocketvault-macos || true
 
-          # Create zip/tar archives containing the binaries.
-          zip -j pocketvault-windows-x86_64.zip pkg/pocketvault.exe pkg/pocketvault pkg/pocketvault-macos || true
-          tar -C pkg -czf pocketvault-linux-x86_64.tar.gz pocketvault pocketvault.exe pocketvault-macos || true
-          tar -C pkg -czf pocketvault-macos-x86_64.tar.gz pocketvault pocketvault.exe pocketvault-macos || true
+          # Create a lightweight macOS .app bundle with only the binary and a minimal plist.
+          version=$(grep '^version' pocketvault-desktop/Cargo.toml | head -1 | sed -E 's/version = "(.*)"/\1/')
+          mkdir -p "pkg/PocketVault.app/Contents/MacOS" "pkg/PocketVault.app/Contents/Resources"
+          cp release-assets/pocketvault-macos-x86_64 pkg/PocketVault.app/Contents/MacOS/pocketvault || true
+          chmod +x "pkg/PocketVault.app/Contents/MacOS/pocketvault" || true
+          cat > "pkg/PocketVault.app/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key><string>pocketvault</string>
+            <key>CFBundleIdentifier</key><string>com.pocketvault.app</string>
+            <key>CFBundleName</key><string>PocketVault</string>
+            <key>CFBundleDisplayName</key><string>PocketVault</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleVersion</key><string>$version</string>
+            <key>CFBundleShortVersionString</key><string>$version</string>
+            <key>LSMinimumSystemVersion</key><string>10.15</string>
+          </dict>
+          </plist>
+          EOF
+
+          # Make the Linux binary executable so it can run directly after download.
+          chmod +x pkg/pocketvault || true
+          chmod +x release-assets/pocketvault-linux-x86_64 || true
+
+          # Create platform-specific archives.
+          zip -j pocketvault-windows-x86_64.zip pkg/pocketvault.exe || true
+          tar -C pkg -czf pocketvault-linux-x86_64.tar.gz pocketvault || true
+          (cd pkg && zip -r ../release-assets/pocketvault-macos-x86_64.app.zip PocketVault.app) || true
 
           mv pocketvault-*.zip pocketvault-*.tar.gz release-assets/ || true
           ls -la release-assets
