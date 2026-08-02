@@ -51,7 +51,7 @@ jobs:
       # Step = one action or command inside a job.
       # uses = run a prebuilt GitHub Action from the marketplace or GitHub.
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Installs Rust so cargo can build the project.
       - name: Install Rust toolchain
@@ -85,7 +85,7 @@ jobs:
       # Upload the compiled binary as an artifact so later jobs can use it.
       # Artifact = a temporary file bundle passed between jobs.
       - name: Upload built binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pocketvault-${{ matrix.artifact_name }}
           path: target/release/${{ matrix.target_name }}
@@ -98,23 +98,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Download each platform artifact created by the build job.
       - name: Download windows artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: pocketvault-windows
           path: artifacts/windows
 
       - name: Download linux artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: pocketvault-linux
           path: artifacts/linux
 
       - name: Download mac artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: pocketvault-macos
           path: artifacts/macos
@@ -163,7 +163,7 @@ jobs:
 
       # Save the assembled release files as a new artifact for the next job.
       - name: Upload combined packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: combined-packages
           path: release-assets/
@@ -177,7 +177,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # This step reads the version from Cargo.toml and confirms the Git tag matches it.
       # GITHUB_REF is the current tag ref, such as refs/tags/v0.1.0.
@@ -195,7 +195,7 @@ jobs:
 
       # Download the packaged assets from the previous job.
       - name: Download combined packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: combined-packages
           path: release-assets
