@@ -5,8 +5,9 @@ use dialoguer::theme::ColorfulTheme;
 /// than dialoguer's default `❯` caret) so the highlighted item reads like a
 /// picked option.
 pub fn menu_theme() -> ColorfulTheme {
-    let mut theme = ColorfulTheme::default();
-    theme.active_item_prefix = console::style("[x]".to_string()).green().bold();
-    theme.inactive_item_prefix = console::style("[ ]".to_string()).dim();
-    theme
+    ColorfulTheme {
+        active_item_prefix: console::style("[x]".to_string()).green().bold(),
+        inactive_item_prefix: console::style("[ ]".to_string()).dim(),
+        ..ColorfulTheme::default()
+    }
 }

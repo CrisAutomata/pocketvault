@@ -4,23 +4,30 @@ This document describes the release workflow for PocketVault.
 
 ## Release trigger
 
-A GitHub Actions workflow runs when a push is made to the `release` branch.
-The workflow builds the desktop app for Windows, Linux, and macOS, packages the binaries, and publishes a GitHub Release.
+A GitHub Actions workflow (`.github/workflows/release.yml`) runs when a version tag like `v0.1.5` is pushed (or via manual dispatch from the Actions tab).
+The workflow builds **both** `pocketvault-desktop` and `pocketvault-cli` for Windows, Linux, and macOS, packages the binaries, and publishes a single GitHub Release containing all of it — one tag, one release page, both apps.
 
 ## Version source
 
-The published release version is taken from `pocketvault-desktop/Cargo.toml`.
+The published release version is taken from `pocketvault-desktop/Cargo.toml`. `pocketvault-cli/Cargo.toml` is kept at the **same** version — the two are released in lockstep, not independently versioned. CI enforces this: the release job fails if the two `Cargo.toml` versions don't match, or if either doesn't match the pushed tag.
 
 Example version field:
 
 ```toml
 [package]
 name = "pocketvault-desktop"
-version = "0.1.0"
+version = "0.1.5"
 edition = "2021"
 ```
 
-The workflow uses that version to create a release tag like `v0.1.0`.
+```toml
+[package]
+name = "pocketvault-cli"
+version = "0.1.5"   # <- must match pocketvault-desktop's version exactly
+edition = "2021"
+```
+
+The workflow uses the desktop version to create a release tag like `v0.1.5`.
 
 ## What happens in CI
 
@@ -30,23 +37,32 @@ The workflow uses three runners:
 2. `ubuntu-latest`
 3. `macos-latest`
 
-Each runner does a `cargo build --release -p pocketvault-desktop` and uploads its built binary as an artifact.
+Each runner builds **both** binaries (`cargo build --release -p pocketvault-desktop` and `cargo build --release -p pocketvault-cli`) and uploads each as its own artifact — six artifacts total (3 platforms × 2 apps).
 
-Then a Linux runner downloads the three artifacts, combines the three platform binaries into cross-platform ZIP archives, and publishes them to GitHub Release.
+Then a Linux runner downloads all six, packages them into platform archives, and publishes them together to one GitHub Release:
+
+- `pocketvault-windows-x86_64.zip` / `pocketvault-linux-x86_64.tar.gz` / `pocketvault-macos-x86_64.app.zip` — the desktop app (unchanged from before; macOS gets a minimal `.app` bundle since it's a GUI app).
+- `pocketvault-cli-windows-x86_64.zip` / `pocketvault-cli-linux-x86_64.tar.gz` / `pocketvault-cli-macos-x86_64.zip` — the CLI. No `.app` bundle — it's a terminal tool, so each archive is just the plain `pocketvault-cli` / `pocketvault-cli.exe` binary.
 
 ## How to cut a new release
 
-1. Update `pocketvault-desktop/Cargo.toml` to the desired version.
+1. Update **both** `pocketvault-desktop/Cargo.toml` and `pocketvault-cli/Cargo.toml` to the same new version.
    - Follow semantic versioning: `MAJOR.MINOR.PATCH`.
-   - Example: `0.1.0` → `0.1.1` for a bug fix.
+   - Example: `0.1.5` → `0.1.6` for a bug fix.
 
 2. Commit the version bump.
 
-3. Merge the commit into the `release` branch.
+3. Push to `main` (or merge a PR that includes it).
 
-4. GitHub Actions will run the release workflow automatically.
+4. Tag the commit and push the tag:
+   ```sh
+   git tag v0.1.6
+   git push origin v0.1.6
+   ```
 
-5. After the workflow finishes, the new GitHub Release will be created with the new tag.
+5. GitHub Actions runs the release workflow automatically on the tag push.
+
+6. After the workflow finishes, the new GitHub Release will be created with both apps' archives attached under that one tag.
 
 ## Recommended versioning
 
@@ -56,55 +72,29 @@ Use small, frequent releases when possible.
 - `0.2.0` for small new features
 - `1.0.0` for a stable first major release
 
-## Alternative workflow (tag-based)
-
-A more common release pattern is to release from git tags instead of a dedicated `release` branch.
-
-1. Develop on `main`.
-2. When ready to publish, bump the version in `pocketvault-desktop/Cargo.toml`.
-3. Create a git tag:
-   ```sh
-git tag v0.1.1
-git push origin v0.1.1
-```
-4. CI publishes the tagged version.
-
-This is a good future improvement if you want a more standard versioned release flow.
-
 ## What to include in releases
 
-Each published release should include:
+Each published release should include six archives, one per (app, platform) pair:
 
-- `pocketvault-windows-x86_64.zip`
-- `pocketvault-linux-x86_64.zip`
-- `pocketvault-macos-x86_64.zip`
+- `pocketvault-windows-x86_64.zip` → `pocketvault.exe` (desktop)
+- `pocketvault-linux-x86_64.tar.gz` → `pocketvault` (desktop)
+- `pocketvault-macos-x86_64.app.zip` → `PocketVault.app` (desktop, minimal macOS app bundle)
+- `pocketvault-cli-windows-x86_64.zip` → `pocketvault-cli.exe` (CLI)
+- `pocketvault-cli-linux-x86_64.tar.gz` → `pocketvault-cli` (CLI)
+- `pocketvault-cli-macos-x86_64.zip` → `pocketvault-cli` (CLI)
 
-Each ZIP contains all three platform binaries:
-- `pocketvault.exe`
-- `pocketvault`
-- `pocketvault-macos`
-
-That lets anyone open the archive and use the executable for their platform.
+Each archive contains just the one binary for that platform — pick the app and platform you want, download that one archive.
 
 ## Notes
 
-- The release workflow is currently triggered by pushes to the `release` branch.
-- The version must be bumped in `pocketvault-desktop/Cargo.toml` before merging to `release`.
-- If you want, this workflow can be updated later to use git tags instead of a dedicated release branch.
+- Example end-to-end flow for a patch release:
+  ```sh
+  # bump both versions to 0.1.6 in pocketvault-desktop/Cargo.toml and pocketvault-cli/Cargo.toml first
+  git add pocketvault-desktop/Cargo.toml pocketvault-cli/Cargo.toml
+  git commit -m "Bump version to 0.1.6"
+  git push origin main
 
-So the usual flow is:
-
-Commit the fix
-Bump the version in Cargo.toml
-Push to main
-Create a new tag, for example v0.1.5
-Example:
-
-
-## COmon
-git add pocketvault-desktop/Cargo.toml
-git commit -m "Fix release workflow build issue"
-git push origin main
-
-git tag v0.1.5
-git push origin v0.1.5
+  git tag v0.1.6
+  git push origin v0.1.6
+  ```
+- The release job double-checks that `pocketvault-desktop/Cargo.toml`'s version, `pocketvault-cli/Cargo.toml`'s version, and the pushed tag all agree — it fails loudly rather than publishing a mismatched release.

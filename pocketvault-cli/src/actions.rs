@@ -15,7 +15,11 @@ use crate::session::CliSession;
 
 pub fn encrypt_files(session: &mut CliSession, cancel_slot: &CancelSlot, paths: Vec<PathBuf>) {
     let dest_folder_id = session.current_folder_id.clone();
-    let total_bytes: u64 = paths.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+    let total_bytes: u64 = paths
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum();
     let label = if paths.len() == 1 {
         paths[0]
             .file_name()
@@ -27,8 +31,12 @@ pub fn encrypt_files(session: &mut CliSession, cancel_slot: &CancelSlot, paths: 
 
     let vault = session.vault.clone();
     let key = session.key.clone();
-    let input = EncryptInput::Files { paths, dest_folder_id };
-    let (new_vault, result) = jobs::run_encrypt(vault, key, input, total_bytes, &label, cancel_slot);
+    let input = EncryptInput::Files {
+        paths,
+        dest_folder_id,
+    };
+    let (new_vault, result) =
+        jobs::run_encrypt(vault, key, input, total_bytes, &label, cancel_slot);
     session.vault = new_vault;
 
     match result {
@@ -45,12 +53,19 @@ pub fn encrypt_files(session: &mut CliSession, cancel_slot: &CancelSlot, paths: 
 pub fn encrypt_folder(session: &mut CliSession, cancel_slot: &CancelSlot, path: PathBuf) {
     let dest_folder_id = session.current_folder_id.clone();
     let total_bytes = pocketvault_core::dir_total_size(&path).unwrap_or(0);
-    let label = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "folder".into());
+    let label = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "folder".into());
 
     let vault = session.vault.clone();
     let key = session.key.clone();
-    let input = EncryptInput::Folder { path, dest_folder_id };
-    let (new_vault, result) = jobs::run_encrypt(vault, key, input, total_bytes, &label, cancel_slot);
+    let input = EncryptInput::Folder {
+        path,
+        dest_folder_id,
+    };
+    let (new_vault, result) =
+        jobs::run_encrypt(vault, key, input, total_bytes, &label, cancel_slot);
     session.vault = new_vault;
 
     match result {
@@ -64,7 +79,12 @@ pub fn encrypt_folder(session: &mut CliSession, cancel_slot: &CancelSlot, path: 
     }
 }
 
-pub fn export_item(session: &mut CliSession, cancel_slot: &CancelSlot, item: &ListedItem, dest_dir: PathBuf) {
+pub fn export_item(
+    session: &mut CliSession,
+    cancel_slot: &CancelSlot,
+    item: &ListedItem,
+    dest_dir: PathBuf,
+) {
     if let Err(e) = std::fs::create_dir_all(&dest_dir) {
         log::fail(format!("Can't create destination folder: {e}"));
         return;
@@ -77,11 +97,23 @@ pub fn export_item(session: &mut CliSession, cancel_slot: &CancelSlot, item: &Li
                 .read_metadata(&item.id, &session.key)
                 .map(|m| m.original_size)
                 .unwrap_or(0);
-            (ExportTarget::File { file_id: item.id.clone(), dest_dir }, size)
+            (
+                ExportTarget::File {
+                    file_id: item.id.clone(),
+                    dest_dir,
+                },
+                size,
+            )
         }
         ItemKind::Folder => {
             let size = listing::folder_total_size(&session.vault, &session.key, &item.id);
-            (ExportTarget::Folder { folder_id: item.id.clone(), dest_dir }, size)
+            (
+                ExportTarget::Folder {
+                    folder_id: item.id.clone(),
+                    dest_dir,
+                },
+                size,
+            )
         }
     };
 
@@ -123,7 +155,10 @@ pub fn create_folder(session: &mut CliSession, name: &str) {
         log::fail("Folder name cannot be empty.");
         return;
     }
-    match session.vault.create_folder(name, session.current_folder_id.as_deref()) {
+    match session
+        .vault
+        .create_folder(name, session.current_folder_id.as_deref())
+    {
         Ok(_) => log::ok(format!("Created folder '{name}'.")),
         Err(e) => log::fail(format!("Error: {e}")),
     }
@@ -141,8 +176,38 @@ pub fn rename_folder(session: &mut CliSession, folder_id: &str, new_name: &str) 
     }
 }
 
+pub fn preview_item(session: &CliSession, item: &ListedItem) {
+    let (_, data) = match session.vault.read_to_memory(&item.id, &session.key) {
+        Ok(result) => result,
+        Err(e) => {
+            log::fail(format!("Error: {e}"));
+            return;
+        }
+    };
+
+    let path = match crate::preview::write_temp_file(&item.name, &data) {
+        Ok(path) => path,
+        Err(e) => {
+            log::fail(format!("Couldn't write a temporary copy to preview: {e}"));
+            return;
+        }
+    };
+
+    match crate::preview::open_with_os_default(&path) {
+        Ok(()) => log::ok(format!(
+            "Opening '{}' in your default app for it…",
+            item.name
+        )),
+        Err(e) => log::fail(format!("Couldn't open '{}': {e}", item.name)),
+    }
+}
+
 pub fn change_password(session: &mut CliSession, old_password: &str, new_password: &str) {
-    match session.vault.meta.change_password(old_password, new_password) {
+    match session
+        .vault
+        .meta
+        .change_password(old_password, new_password)
+    {
         Ok(()) => match session.vault.save() {
             Ok(()) => log::ok("Password changed."),
             Err(e) => log::fail(format!("Error saving vault: {e}")),

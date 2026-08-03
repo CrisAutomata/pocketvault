@@ -3,19 +3,21 @@ use std::path::PathBuf;
 use clap::Parser;
 
 mod actions;
-mod commands;
+mod input;
 mod jobs;
 mod listing;
 mod log;
 mod menu;
+mod preview;
 mod prompt;
 mod session;
 mod theme;
+mod tui;
 
 /// PocketVault — interactive vault session, mirroring the desktop app's
 /// unlock/create -> browse/encrypt/export -> lock flow as a REPL.
 #[derive(Parser)]
-#[command(name = "pocketvault", version, about)]
+#[command(name = "pocketvault-cli", version, about)]
 struct Cli {
     /// Directory containing (or to create) the vault. Defaults to the
     /// current directory, same convention as `git init`.
@@ -30,7 +32,10 @@ fn main() {
         .unwrap_or_else(|| std::env::current_dir().expect("cannot read current directory"));
 
     if let Err(e) = std::fs::create_dir_all(&base_dir) {
-        eprintln!("Can't use '{}' as the vault directory: {e}", base_dir.display());
+        eprintln!(
+            "Can't use '{}' as the vault directory: {e}",
+            base_dir.display()
+        );
         std::process::exit(1);
     }
 

@@ -58,7 +58,12 @@ pub fn run(session: &mut CliSession, cancel_slot: &CancelSlot) -> MenuOutcome {
 
 fn print_location(session: &CliSession) {
     println!();
-    println!("{}", format!("vault:{}", listing::path_string(session)).bold().cyan());
+    println!(
+        "{}",
+        format!("vault:{}", listing::path_string(session))
+            .bold()
+            .cyan()
+    );
 }
 
 /// A `Select` over `items`, rendered with the `[x]`/`[ ]` theme. `None` on
@@ -74,11 +79,16 @@ fn select(prompt: &str, items: &[&str]) -> Option<usize> {
 }
 
 fn input(prompt: &str) -> Option<String> {
-    Input::<String>::with_theme(&menu_theme()).with_prompt(prompt).interact_text().ok()
+    Input::<String>::with_theme(&menu_theme())
+        .with_prompt(prompt)
+        .interact_text()
+        .ok()
 }
 
 fn encrypt_file_flow(session: &mut CliSession, cancel_slot: &CancelSlot) {
-    let Some(raw) = input("Path to the file to encrypt") else { return };
+    let Some(raw) = input("Path to the file to encrypt") else {
+        return;
+    };
     let path = PathBuf::from(raw);
     if !path.is_file() {
         log::fail("That's not an existing file.");
@@ -88,7 +98,9 @@ fn encrypt_file_flow(session: &mut CliSession, cancel_slot: &CancelSlot) {
 }
 
 fn encrypt_folder_flow(session: &mut CliSession, cancel_slot: &CancelSlot) {
-    let Some(raw) = input("Path to the folder to encrypt") else { return };
+    let Some(raw) = input("Path to the folder to encrypt") else {
+        return;
+    };
     let path = PathBuf::from(raw);
     if !path.is_dir() {
         log::fail("That's not an existing folder.");
@@ -97,58 +109,66 @@ fn encrypt_folder_flow(session: &mut CliSession, cancel_slot: &CancelSlot) {
     actions::encrypt_folder(session, cancel_slot, path);
 }
 
+enum BrowseRow {
+    Item(usize),
+    Up,
+    EncryptFile,
+    EncryptFolder,
+    NewFolder,
+    Back,
+}
+
+/// Encrypt File/Folder are offered here too, not just from the main menu —
+/// otherwise encrypting into a subfolder you've navigated into meant backing
+/// all the way out to the main menu first (it would still land in the right
+/// folder, since `current_folder_id` isn't reset by that, but nothing here
+/// hinted that was possible).
 fn browse(session: &mut CliSession, cancel_slot: &CancelSlot) {
     loop {
-        session.last_listing =
-            listing::build_listing(&session.vault, &session.key, session.current_folder_id.as_deref());
-        let item_count = session.last_listing.len();
+        session.last_listing = listing::build_listing(
+            &session.vault,
+            &session.key,
+            session.current_folder_id.as_deref(),
+        );
 
-        let mut labels: Vec<String> = session
-            .last_listing
-            .iter()
-            .map(|item| match item.kind {
-                ItemKind::Folder => {
-                    let count = session.vault.meta.folder_file_count(&item.id);
-                    format!("\u{1F4C1} {} ({} item{})", item.name, count, if count == 1 { "" } else { "s" })
-                }
-                ItemKind::File => {
-                    let size = session
-                        .vault
-                        .read_metadata(&item.id, &session.key)
-                        .map(|m| listing::format_size(m.original_size))
-                        .unwrap_or_else(|_| "—".into());
-                    format!("\u{1F4C4} {} ({size})", item.name)
-                }
-            })
-            .collect();
+        let mut labels: Vec<String> = Vec::new();
+        let mut rows: Vec<BrowseRow> = Vec::new();
 
-        let has_parent = session.current_folder_id.is_some();
-        if has_parent {
-            labels.push(".. Up one level".to_string());
+        for (i, item) in session.last_listing.iter().enumerate() {
+            labels.push(listing::item_label(&session.vault, &session.key, item));
+            rows.push(BrowseRow::Item(i));
         }
+
+        if session.current_folder_id.is_some() {
+            labels.push(".. Up one level".to_string());
+            rows.push(BrowseRow::Up);
+        }
+        labels.push("+ Encrypt File".to_string());
+        rows.push(BrowseRow::EncryptFile);
+        labels.push("+ Encrypt Folder".to_string());
+        rows.push(BrowseRow::EncryptFolder);
         labels.push("+ New Folder".to_string());
+        rows.push(BrowseRow::NewFolder);
         labels.push("< Back to Main Menu".to_string());
+        rows.push(BrowseRow::Back);
 
         print_location(session);
         let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-        let Some(idx) = select("", &refs) else { continue };
-
-        if idx < item_count {
-            item_action(session, cancel_slot, idx);
+        let Some(idx) = select("", &refs) else {
             continue;
-        }
+        };
 
-        let control = idx - item_count;
-        let is_up = has_parent && control == 0;
-        let is_new_folder = control == has_parent as usize;
-        if is_up {
-            go_up(session);
-        } else if is_new_folder {
-            if let Some(name) = input("New folder name") {
-                actions::create_folder(session, &name);
+        match &rows[idx] {
+            BrowseRow::Item(item_idx) => item_action(session, cancel_slot, *item_idx),
+            BrowseRow::Up => go_up(session),
+            BrowseRow::EncryptFile => encrypt_file_flow(session, cancel_slot),
+            BrowseRow::EncryptFolder => encrypt_folder_flow(session, cancel_slot),
+            BrowseRow::NewFolder => {
+                if let Some(name) = input("New folder name") {
+                    actions::create_folder(session, &name);
+                }
             }
-        } else {
-            return; // "Back to Main Menu"
+            BrowseRow::Back => return,
         }
     }
 }
@@ -174,7 +194,9 @@ fn item_action(session: &mut CliSession, cancel_slot: &CancelSlot, idx: usize) {
 
 fn folder_action(session: &mut CliSession, cancel_slot: &CancelSlot, item: &ListedItem) {
     const OPTIONS: &[&str] = &["Open", "Export", "Rename", "Delete", "Cancel"];
-    let Some(idx) = select(&item.name, OPTIONS) else { return };
+    let Some(idx) = select(&item.name, OPTIONS) else {
+        return;
+    };
     match idx {
         0 => session.current_folder_id = Some(item.id.clone()),
         1 => export_flow(session, cancel_slot, item),
@@ -190,7 +212,9 @@ fn folder_action(session: &mut CliSession, cancel_slot: &CancelSlot, item: &List
 
 fn file_action(session: &mut CliSession, cancel_slot: &CancelSlot, item: &ListedItem) {
     const OPTIONS: &[&str] = &["Preview", "Export", "Delete", "Cancel"];
-    let Some(idx) = select(&item.name, OPTIONS) else { return };
+    let Some(idx) = select(&item.name, OPTIONS) else {
+        return;
+    };
     match idx {
         0 => preview_flow(session, item),
         1 => export_flow(session, cancel_slot, item),
@@ -200,13 +224,18 @@ fn file_action(session: &mut CliSession, cancel_slot: &CancelSlot, item: &Listed
 }
 
 fn export_flow(session: &mut CliSession, cancel_slot: &CancelSlot, item: &ListedItem) {
-    let Some(dest) = input("Export to which folder on disk?") else { return };
+    let Some(dest) = input("Export to which folder on disk?") else {
+        return;
+    };
     actions::export_item(session, cancel_slot, item, PathBuf::from(dest));
 }
 
 fn delete_flow(session: &mut CliSession, item: &ListedItem) {
     let message = if item.kind == ItemKind::Folder {
-        format!("Delete folder '{}' and everything inside it? This cannot be undone.", item.name)
+        format!(
+            "Delete folder '{}' and everything inside it? This cannot be undone.",
+            item.name
+        )
     } else {
         format!("Permanently delete '{}'? This cannot be undone.", item.name)
     };
@@ -223,19 +252,8 @@ fn delete_flow(session: &mut CliSession, item: &ListedItem) {
     }
 }
 
-fn preview_flow(session: &mut CliSession, item: &ListedItem) {
-    match session.vault.read_to_memory(&item.id, &session.key) {
-        Ok((meta, data)) => {
-            if meta.mime_type == "text/plain" {
-                println!("{}", String::from_utf8_lossy(&data));
-            } else if meta.mime_type.starts_with("image/") {
-                log::warn(format!("'{}' is an image — terminals can't render it. Use Export instead.", item.name));
-            } else {
-                log::warn(format!("Preview isn't supported for '{}' ({}).", item.name, meta.mime_type));
-            }
-        }
-        Err(e) => log::fail(format!("Error: {e}")),
-    }
+fn preview_flow(session: &CliSession, item: &ListedItem) {
+    actions::preview_item(session, item);
 }
 
 enum SettingsOutcome {
@@ -248,7 +266,9 @@ fn settings(session: &mut CliSession) -> SettingsOutcome {
     loop {
         println!();
         println!("{}", "Settings".bold().cyan());
-        let Some(idx) = select("", OPTIONS) else { return SettingsOutcome::Back };
+        let Some(idx) = select("", OPTIONS) else {
+            return SettingsOutcome::Back;
+        };
         match idx {
             0 => change_password_flow(session),
             1 => return SettingsOutcome::Lock,
@@ -259,7 +279,10 @@ fn settings(session: &mut CliSession) -> SettingsOutcome {
 }
 
 fn change_password_flow(session: &mut CliSession) {
-    let Ok(old_password) = Password::with_theme(&menu_theme()).with_prompt("Current password").interact() else {
+    let Ok(old_password) = Password::with_theme(&menu_theme())
+        .with_prompt("Current password")
+        .interact()
+    else {
         return;
     };
     let Ok(new_password) = Password::with_theme(&menu_theme())

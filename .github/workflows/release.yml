@@ -36,12 +36,18 @@ jobs:
           - os: windows-latest
             target_name: pocketvault.exe
             artifact_name: windows
+            cli_target_name: pocketvault-cli.exe
+            cli_artifact_name: cli-windows
           - os: ubuntu-latest
             target_name: pocketvault
             artifact_name: linux
+            cli_target_name: pocketvault-cli
+            cli_artifact_name: cli-linux
           - os: macos-latest
             target_name: pocketvault
             artifact_name: macos
+            cli_target_name: pocketvault-cli
+            cli_artifact_name: cli-macos
 
     # runs-on selects the virtual machine image for this job.
     # The matrix makes this job run 3 times, once per OS.
@@ -63,6 +69,8 @@ jobs:
 
       # This step only runs on Ubuntu because Linux GUI libraries are needed.
       # run = execute shell commands in the job environment.
+      # pocketvault-cli has no GUI dependencies, so this is only for the
+      # desktop app's build below.
       - name: Install Linux GUI dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -79,16 +87,28 @@ jobs:
             pkg-config
 
       # Build the desktop app in release mode.
-      - name: Build release binary
+      - name: Build desktop release binary
         run: cargo build --release -p pocketvault-desktop
 
       # Upload the compiled binary as an artifact so later jobs can use it.
       # Artifact = a temporary file bundle passed between jobs.
-      - name: Upload built binary
+      - name: Upload built desktop binary
         uses: actions/upload-artifact@v7
         with:
           name: pocketvault-${{ matrix.artifact_name }}
           path: target/release/${{ matrix.target_name }}
+          retention-days: 3
+
+      # Build the CLI in release mode — same three platforms, published
+      # alongside the desktop app in the same release.
+      - name: Build CLI release binary
+        run: cargo build --release -p pocketvault-cli
+
+      - name: Upload built CLI binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: pocketvault-${{ matrix.cli_artifact_name }}
+          path: target/release/${{ matrix.cli_target_name }}
           retention-days: 3
 
   # assemble job depends on build.
@@ -119,6 +139,25 @@ jobs:
           name: pocketvault-macos
           path: artifacts/macos
 
+      # Same three platforms, but for the CLI binaries.
+      - name: Download CLI windows artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: pocketvault-cli-windows
+          path: artifacts/cli-windows
+
+      - name: Download CLI linux artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: pocketvault-cli-linux
+          path: artifacts/cli-linux
+
+      - name: Download CLI mac artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: pocketvault-cli-macos
+          path: artifacts/cli-macos
+
       # This shell script collects the downloaded binaries and packages them.
       # It uses basic Linux shell commands like mkdir, cp, zip, tar, and mv.
       - name: Create combined packages
@@ -148,9 +187,39 @@ jobs:
             fi
           fi
 
+          # Same as above, for the CLI binaries.
+          if [ -d artifacts/cli-windows ]; then
+            f=$(ls -1 artifacts/cli-windows | head -n1 || true)
+            if [ -n "$f" ]; then
+              cp "artifacts/cli-windows/$f" release-assets/pocketvault-cli-windows-x86_64.exe || true
+            fi
+          fi
+
+          if [ -d artifacts/cli-linux ]; then
+            f=$(ls -1 artifacts/cli-linux | head -n1 || true)
+            if [ -n "$f" ]; then
+              cp "artifacts/cli-linux/$f" release-assets/pocketvault-cli-linux-x86_64 || true
+            fi
+          fi
+
+          if [ -d artifacts/cli-macos ]; then
+            f=$(ls -1 artifacts/cli-macos | head -n1 || true)
+            if [ -n "$f" ]; then
+              cp "artifacts/cli-macos/$f" release-assets/pocketvault-cli-macos-x86_64 || true
+            fi
+          fi
+
           # Put the files into a temporary pkg folder with consistent names.
           cp release-assets/pocketvault-windows-x86_64.exe pkg/pocketvault.exe || true
           cp release-assets/pocketvault-linux-x86_64 pkg/pocketvault || true
+
+          # CLI binaries get their own subfolder per platform (rather than
+          # flat in pkg/) since the linux and macos ones would otherwise
+          # collide on the same clean filename ("pocketvault-cli").
+          mkdir -p pkg/cli-windows pkg/cli-linux pkg/cli-macos
+          cp release-assets/pocketvault-cli-windows-x86_64.exe pkg/cli-windows/pocketvault-cli.exe || true
+          cp release-assets/pocketvault-cli-linux-x86_64 pkg/cli-linux/pocketvault-cli || true
+          cp release-assets/pocketvault-cli-macos-x86_64 pkg/cli-macos/pocketvault-cli || true
 
           # Create a lightweight macOS .app bundle with only the binary and a minimal plist.
           version=$(grep '^version' pocketvault-desktop/Cargo.toml | head -1 | sed -E 's/version = "(.*)"/\1/')
@@ -174,14 +243,23 @@ jobs:
           </plist>
           EOF
 
-          # Make the Linux binary executable so it can run directly after download.
+          # Make the Linux binaries executable so they can run directly after download.
           chmod +x pkg/pocketvault || true
           chmod +x release-assets/pocketvault-linux-x86_64 || true
+          chmod +x pkg/cli-linux/pocketvault-cli || true
+          chmod +x release-assets/pocketvault-cli-linux-x86_64 || true
+          chmod +x pkg/cli-macos/pocketvault-cli || true
 
           # Create platform-specific archives.
           zip -j pocketvault-windows-x86_64.zip pkg/pocketvault.exe || true
           tar -C pkg -czf pocketvault-linux-x86_64.tar.gz pocketvault || true
           (cd pkg && zip -r ../release-assets/pocketvault-macos-x86_64.app.zip PocketVault.app) || true
+
+          # Same three platforms, for the CLI — no .app bundle needed, it's
+          # a terminal tool, so just a plain archive per platform.
+          zip -j pocketvault-cli-windows-x86_64.zip pkg/cli-windows/pocketvault-cli.exe || true
+          tar -C pkg/cli-linux -czf pocketvault-cli-linux-x86_64.tar.gz pocketvault-cli || true
+          zip -j pocketvault-cli-macos-x86_64.zip pkg/cli-macos/pocketvault-cli || true
 
           mv pocketvault-*.zip pocketvault-*.tar.gz release-assets/ || true
           ls -la release-assets
@@ -207,13 +285,21 @@ jobs:
       # This step reads the version from Cargo.toml and confirms the Git tag matches it.
       # GITHUB_REF is the current tag ref, such as refs/tags/v0.1.0.
       # GITHUB_OUTPUT lets a step pass data to later steps.
+      # pocketvault-cli's version is checked too, since it's meant to track
+      # the desktop version in lockstep — this catches forgetting to bump one
+      # of the two before tagging.
       - name: Read version from Cargo.toml and validate tag
         id: version
         run: |
           version=$(grep '^version' pocketvault-desktop/Cargo.toml | head -1 | sed -E 's/version = "(.*)"/\1/')
+          cli_version=$(grep '^version' pocketvault-cli/Cargo.toml | head -1 | sed -E 's/version = "(.*)"/\1/')
           tag=${GITHUB_REF#refs/tags/}
           if [ "v$version" != "$tag" ]; then
-            echo "Tag name ($tag) does not match Cargo.toml version (v$version)"
+            echo "Tag name ($tag) does not match pocketvault-desktop/Cargo.toml version (v$version)"
+            exit 1
+          fi
+          if [ "$cli_version" != "$version" ]; then
+            echo "pocketvault-cli/Cargo.toml version ($cli_version) does not match pocketvault-desktop/Cargo.toml version ($version) — bump both together"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"

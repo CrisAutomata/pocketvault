@@ -6,8 +6,9 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -50,8 +51,14 @@ pub enum EncryptInput {
 }
 
 pub enum ExportTarget {
-    File { file_id: String, dest_dir: PathBuf },
-    Folder { folder_id: String, dest_dir: PathBuf },
+    File {
+        file_id: String,
+        dest_dir: PathBuf,
+    },
+    Folder {
+        folder_id: String,
+        dest_dir: PathBuf,
+    },
 }
 
 /// Runs `op` on a background thread so there's always something to animate —
@@ -59,7 +66,13 @@ pub enum ExportTarget {
 /// in `cancel_slot` so Ctrl-C can reach them), or a lightweight spinner for
 /// everything smaller (not cancellable, same as the desktop's synchronous
 /// small-job path — it's just not blocking the terminal while it runs).
-fn with_progress<T, F>(verb: &str, label: &str, total_bytes: u64, cancel_slot: &CancelSlot, op: F) -> T
+fn with_progress<T, F>(
+    verb: &str,
+    label: &str,
+    total_bytes: u64,
+    cancel_slot: &CancelSlot,
+    op: F,
+) -> T
 where
     T: Send + 'static,
     F: FnOnce(Arc<JobControl>) -> T + Send + 'static,
@@ -125,18 +138,26 @@ pub fn run_encrypt(
     label: &str,
     cancel_slot: &CancelSlot,
 ) -> (Vault, Result<Vec<String>>) {
-    with_progress("Encrypting", label, total_bytes, cancel_slot, move |control| {
-        let mut vault = vault;
-        let result = match input {
-            EncryptInput::Files { paths, dest_folder_id } => {
-                vault.encrypt_files(&paths, dest_folder_id.as_deref(), &key, &control)
-            }
-            EncryptInput::Folder { path, dest_folder_id } => {
-                vault.encrypt_folder(&path, dest_folder_id.as_deref(), &key, &control)
-            }
-        };
-        (vault, result)
-    })
+    with_progress(
+        "Encrypting",
+        label,
+        total_bytes,
+        cancel_slot,
+        move |control| {
+            let mut vault = vault;
+            let result = match input {
+                EncryptInput::Files {
+                    paths,
+                    dest_folder_id,
+                } => vault.encrypt_files(&paths, dest_folder_id.as_deref(), &key, &control),
+                EncryptInput::Folder {
+                    path,
+                    dest_folder_id,
+                } => vault.encrypt_folder(&path, dest_folder_id.as_deref(), &key, &control),
+            };
+            (vault, result)
+        },
+    )
 }
 
 /// Exports `target` — read-only, so there's no vault to hand back.
@@ -148,8 +169,152 @@ pub fn run_export(
     label: &str,
     cancel_slot: &CancelSlot,
 ) -> Result<PathBuf> {
-    with_progress("Exporting", label, total_bytes, cancel_slot, move |control| match target {
-        ExportTarget::File { file_id, dest_dir } => vault.export_file(&file_id, &dest_dir, &key, &control),
-        ExportTarget::Folder { folder_id, dest_dir } => vault.export_folder(&folder_id, &dest_dir, &key, &control),
-    })
+    with_progress(
+        "Exporting",
+        label,
+        total_bytes,
+        cancel_slot,
+        move |control| match target {
+            ExportTarget::File { file_id, dest_dir } => {
+                vault.export_file(&file_id, &dest_dir, &key, &control)
+            }
+            ExportTarget::Folder {
+                folder_id,
+                dest_dir,
+            } => vault.export_folder(&folder_id, &dest_dir, &key, &control),
+        },
+    )
+}
+
+// ── Non-blocking job API — used by the full-screen `tui` UI ─────────────
+//
+// The menu UI above can afford to block: `dialoguer` isn't doing anything
+// else while a job runs. The full-screen UI owns a render loop that must
+// keep redrawing (and keep watching for a Ctrl-C keypress) while a job is
+// in flight, so it needs to *start* a job and poll it from that loop instead
+// of blocking on it.
+
+pub enum JobOutcome {
+    Encrypt(Vault, Result<Vec<String>>),
+    Export(Result<PathBuf>),
+}
+
+pub struct RunningJob {
+    pub label: String,
+    pub verb: &'static str,
+    pub control: Arc<JobControl>,
+    pub total_bytes: u64,
+    pub started_at: Instant,
+    pub big: bool,
+    receiver: Receiver<JobOutcome>,
+}
+
+impl RunningJob {
+    /// Non-blocking: `None` while the background thread is still working.
+    pub fn poll(&self) -> Option<JobOutcome> {
+        self.receiver.try_recv().ok()
+    }
+}
+
+fn spawn_job<F>(
+    verb: &'static str,
+    label: String,
+    total_bytes: u64,
+    cancel_slot: &CancelSlot,
+    op: F,
+) -> RunningJob
+where
+    F: FnOnce(Arc<JobControl>) -> JobOutcome + Send + 'static,
+{
+    let big = total_bytes >= BIG_JOB_THRESHOLD_BYTES;
+    let control = Arc::new(JobControl::default());
+    if big {
+        if let Ok(mut guard) = cancel_slot.lock() {
+            *guard = Some(control.clone());
+        }
+    }
+
+    let (tx, rx) = mpsc::channel();
+    let control_for_thread = control.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(op(control_for_thread));
+    });
+
+    RunningJob {
+        label,
+        verb,
+        control,
+        total_bytes,
+        started_at: Instant::now(),
+        big,
+        receiver: rx,
+    }
+}
+
+pub fn start_encrypt(
+    vault: Vault,
+    key: VaultKey,
+    input: EncryptInput,
+    total_bytes: u64,
+    label: String,
+    cancel_slot: &CancelSlot,
+) -> RunningJob {
+    spawn_job(
+        "Encrypting",
+        label,
+        total_bytes,
+        cancel_slot,
+        move |control| {
+            let mut vault = vault;
+            let result = match input {
+                EncryptInput::Files {
+                    paths,
+                    dest_folder_id,
+                } => vault.encrypt_files(&paths, dest_folder_id.as_deref(), &key, &control),
+                EncryptInput::Folder {
+                    path,
+                    dest_folder_id,
+                } => vault.encrypt_folder(&path, dest_folder_id.as_deref(), &key, &control),
+            };
+            JobOutcome::Encrypt(vault, result)
+        },
+    )
+}
+
+pub fn start_export(
+    vault: Vault,
+    key: VaultKey,
+    target: ExportTarget,
+    total_bytes: u64,
+    label: String,
+    cancel_slot: &CancelSlot,
+) -> RunningJob {
+    spawn_job(
+        "Exporting",
+        label,
+        total_bytes,
+        cancel_slot,
+        move |control| {
+            let result = match target {
+                ExportTarget::File { file_id, dest_dir } => {
+                    vault.export_file(&file_id, &dest_dir, &key, &control)
+                }
+                ExportTarget::Folder {
+                    folder_id,
+                    dest_dir,
+                } => vault.export_folder(&folder_id, &dest_dir, &key, &control),
+            };
+            JobOutcome::Export(result)
+        },
+    )
+}
+
+/// Clears a finished job's `JobControl` registration from `cancel_slot`
+/// (only ever set for "big" jobs — see `spawn_job`).
+pub fn finish_job(job: RunningJob, cancel_slot: &CancelSlot) {
+    if job.big {
+        if let Ok(mut guard) = cancel_slot.lock() {
+            *guard = None;
+        }
+    }
 }

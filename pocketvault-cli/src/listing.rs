@@ -1,8 +1,6 @@
 //! Building and printing the current folder's contents, and resolving a
 //! user-typed name or index (from the last such listing) back to an id.
 
-use owo_colors::OwoColorize;
-
 use pocketvault_core::{Vault, VaultKey};
 
 use crate::session::CliSession;
@@ -86,23 +84,18 @@ pub fn path_string(session: &CliSession) -> String {
     }
 }
 
-pub fn vault_total_size(vault: &Vault, key: &VaultKey) -> u64 {
-    vault
-        .meta
-        .files
-        .iter()
-        .filter_map(|f| vault.read_metadata(&f.id, key).ok())
-        .map(|m| m.original_size)
-        .sum()
-}
-
 /// Recursive, decrypted-size total for everything under `folder_id` — used
 /// to decide whether exporting/deleting a folder counts as a "big" job.
 pub fn folder_total_size(vault: &Vault, key: &VaultKey, folder_id: &str) -> u64 {
     let mut total: u64 = vault
         .files_in_folder(Some(folder_id))
         .iter()
-        .map(|f| vault.read_metadata(&f.id, key).map(|m| m.original_size).unwrap_or(0))
+        .map(|f| {
+            vault
+                .read_metadata(&f.id, key)
+                .map(|m| m.original_size)
+                .unwrap_or(0)
+        })
         .sum();
     for sub in vault.folders(Some(folder_id)) {
         total += folder_total_size(vault, key, &sub.id);
@@ -110,68 +103,30 @@ pub fn folder_total_size(vault: &Vault, key: &VaultKey, folder_id: &str) -> u64 
     total
 }
 
-pub fn print_listing(session: &CliSession) {
-    let items = &session.last_listing;
-
-    if items.is_empty() {
-        println!("(empty — use `encrypt <path>` to add files)");
-    }
-
-    let folders: Vec<(usize, &ListedItem)> = items
-        .iter()
-        .enumerate()
-        .filter(|(_, i)| i.kind == ItemKind::Folder)
-        .collect();
-    let files: Vec<(usize, &ListedItem)> = items
-        .iter()
-        .enumerate()
-        .filter(|(_, i)| i.kind == ItemKind::File)
-        .collect();
-
-    if !folders.is_empty() {
-        println!("{}", "FOLDERS".bold());
-        for (idx, item) in &folders {
-            let count = session.vault.meta.folder_file_count(&item.id);
-            println!(
-                "  {:>2}  \u{1F4C1} {:<30} {} item{}",
-                idx + 1,
+/// A one-line label for `item`, used by both front ends: an icon, the name,
+/// and — for files — size and last-modified, decrypted just far enough to
+/// read the metadata (never the file body).
+pub fn item_label(vault: &Vault, key: &VaultKey, item: &ListedItem) -> String {
+    match item.kind {
+        ItemKind::Folder => {
+            let count = vault.meta.folder_file_count(&item.id);
+            format!(
+                "\u{1F4C1} {}  ({} item{})",
                 item.name,
                 count,
                 if count == 1 { "" } else { "s" }
-            );
+            )
         }
-    }
-
-    if !files.is_empty() {
-        println!("{}", "FILES".bold());
-        for (idx, item) in &files {
-            let meta = session.vault.read_metadata(&item.id, &session.key).ok();
-            let size = meta
-                .as_ref()
-                .map(|m| format_size(m.original_size))
-                .unwrap_or_else(|| "—".into());
-            let modified = meta
-                .as_ref()
-                .map(|m| format_ts(m.modified_ts))
-                .unwrap_or_else(|| "—".into());
-            println!(
-                "  {:>2}  \u{1F4C4} {:<30} {:>10}  {}",
-                idx + 1,
+        ItemKind::File => match vault.read_metadata(&item.id, key) {
+            Ok(meta) => format!(
+                "\u{1F4C4} {}  ({}, {})",
                 item.name,
-                size,
-                modified
-            );
-        }
+                format_size(meta.original_size),
+                format_ts(meta.modified_ts)
+            ),
+            Err(_) => format!("\u{1F4C4} {}", item.name),
+        },
     }
-
-    let total = folders.len() + files.len();
-    println!();
-    println!(
-        "{} item{} — vault total: {}",
-        total,
-        if total == 1 { "" } else { "s" },
-        format_size(vault_total_size(&session.vault, &session.key))
-    );
 }
 
 pub fn format_size(bytes: u64) -> String {

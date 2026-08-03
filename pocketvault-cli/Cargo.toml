@@ -1,16 +1,15 @@
 [package]
 name = "pocketvault-cli"
-version = "0.1.0"
+version = "0.1.5"
 edition = "2021"
 
 [[bin]]
-name = "pocketvault"
+name = "pocketvault-cli"
 path = "src/main.rs"
 
 [dependencies]
 pocketvault-core = { path = "../pocketvault-core" }
 clap = { version = "4", features = ["derive"] }
-rustyline = "14"
 rpassword = "7"
 shell-words = "1"
 indicatif = "0.17"
@@ -18,6 +17,8 @@ owo-colors = "4"
 ctrlc = "3"
 dialoguer = "0.11"
 console = "0.15"
+ratatui = "0.29"
+crossterm = "0.28"
 
 [dev-dependencies]
 tempfile = "3"

@@ -3,19 +3,19 @@ use std::path::{Path, PathBuf};
 
 use pocketvault_core::{Vault, VaultKey};
 
-use crate::commands::{self, Outcome};
-use crate::jobs::{self, CancelSlot};
-use crate::listing::{self, ListedItem};
+use crate::jobs;
+use crate::listing::ListedItem;
 use crate::menu::{self, MenuOutcome};
-use crate::prompt::{self, Prompter};
+use crate::prompt;
+use crate::tui::{self, TuiOutcome};
 
 pub struct CliSession {
     pub vault: Vault,
     pub key: VaultKey,
     pub current_folder_id: Option<String>,
-    /// The folders/files shown by the most recent `ls` (or auto-listing after
-    /// `cd`) — lets commands address an item by the index number just shown,
-    /// not just by typing its full name again.
+    /// The folders/files shown by the most recent listing — lets commands
+    /// address an item by the index number just shown, not just by typing
+    /// its full name again.
     pub last_listing: Vec<ListedItem>,
 }
 
@@ -30,15 +30,24 @@ impl CliSession {
     }
 }
 
+enum SessionOutcome {
+    Lock,
+    Exit,
+}
+
 pub fn run(base_dir: PathBuf) {
+    // Both front ends (the arrow-key menu and the full-screen command UI)
+    // take over the terminal's raw mode — there's no meaningful degraded
+    // mode for piped/non-interactive input, unlike the old scrolling REPL.
+    if !std::io::stdin().is_terminal() {
+        eprintln!("PocketVault needs an interactive terminal to run.");
+        std::process::exit(1);
+    }
+
     println!("PocketVault — interactive vault session");
     println!("Vault directory: {}", base_dir.display());
 
     let cancel_slot = jobs::install_ctrlc_handler();
-    // The menu UI (dialoguer/console raw-mode key reads) needs a real TTY —
-    // without one (piped input, CI, tests) we stay in command-line mode for
-    // the whole session, same graceful degradation as `Prompter`/`rpassword`.
-    let menu_available = std::io::stdin().is_terminal();
 
     loop {
         let Some(mut session) = authenticate(&base_dir) else {
@@ -46,34 +55,32 @@ pub fn run(base_dir: PathBuf) {
             return;
         };
 
-        let mut in_menu = menu_available;
+        let mut in_menu = true;
         let outcome = loop {
             if in_menu {
                 match menu::run(&mut session, &cancel_slot) {
                     MenuOutcome::UseCommandLine => in_menu = false,
-                    MenuOutcome::Lock => break Outcome::Lock,
-                    MenuOutcome::Exit => break Outcome::Exit,
+                    MenuOutcome::Lock => break SessionOutcome::Lock,
+                    MenuOutcome::Exit => break SessionOutcome::Exit,
                 }
             } else {
-                match repl(&mut session, &cancel_slot, menu_available) {
-                    Outcome::Menu => in_menu = true,
-                    Outcome::Lock => break Outcome::Lock,
-                    Outcome::Exit => break Outcome::Exit,
-                    Outcome::Continue => unreachable!("repl() only returns on menu/lock/exit"),
+                match tui::run(&mut session, &cancel_slot) {
+                    TuiOutcome::UseMenu => in_menu = true,
+                    TuiOutcome::Lock => break SessionOutcome::Lock,
+                    TuiOutcome::Exit => break SessionOutcome::Exit,
                 }
             }
         };
 
         match outcome {
-            Outcome::Lock => {
+            SessionOutcome::Lock => {
                 println!("Vault locked.");
                 continue;
             }
-            Outcome::Exit => {
+            SessionOutcome::Exit => {
                 println!("Goodbye.");
                 return;
             }
-            _ => unreachable!("loop above only breaks with Lock or Exit"),
         }
     }
 }
@@ -142,33 +149,5 @@ fn create_vault(base_dir: &Path) -> Option<CliSession> {
                 None
             }
         };
-    }
-}
-
-fn repl(session: &mut CliSession, cancel_slot: &CancelSlot, menu_available: bool) -> Outcome {
-    println!("Type `help` for commands, `lock` to lock the vault, `exit` to quit.");
-    if menu_available {
-        println!("Type `menu` to switch back to the menu-driven UI.");
-    }
-    session.last_listing = listing::build_listing(&session.vault, &session.key, session.current_folder_id.as_deref());
-    listing::print_listing(session);
-
-    let mut prompter = Prompter::new();
-    loop {
-        let prompt_text = format!("vault:{}> ", listing::path_string(session));
-        let Some(line) = prompter.read_line(&prompt_text) else {
-            println!();
-            return Outcome::Exit;
-        };
-
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        match commands::dispatch(session, cancel_slot, line, menu_available) {
-            Outcome::Continue => {}
-            outcome => return outcome,
-        }
     }
 }
