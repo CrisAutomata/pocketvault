@@ -2,6 +2,7 @@
 members = [
     "pocketvault-core",
     "pocketvault-desktop",
+    "pocketvault-cli",
 ]
 resolver = "2"
 
