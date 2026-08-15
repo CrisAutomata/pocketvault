@@ -40,6 +40,12 @@ pub enum VaultError {
 
     #[error("Operation cancelled")]
     Cancelled,
+
+    #[error("Not enough free disk space to repack this vault")]
+    InsufficientDiskSpace,
+
+    #[error("Vault is already open in another process")]
+    VaultLockedByAnotherProcess,
 }
 
 pub type Result<T> = std::result::Result<T, VaultError>;

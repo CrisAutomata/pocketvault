@@ -11,7 +11,7 @@ use crate::message::Message;
 use crate::state::{
     build_meta_cache, freeze_eta_if_ready, vault_folder_total_size, AuthMode, AuthState,
     CancelTarget, EncryptJobInput, Modal, PocketVault, PreviewData, QueuedEncryptJob,
-    RunningDeleteJob, RunningEncryptJob, RunningExportJob, Screen, Session,
+    RunningDeleteJob, RunningEncryptJob, RunningExportJob, RunningRepackJob, Screen, Session,
     BIG_JOB_THRESHOLD_BYTES, MAX_QUEUE_TOTAL,
 };
 
@@ -282,6 +282,11 @@ pub fn update(app: &mut PocketVault, message: Message) -> Task<Message> {
             let cancellable = match target {
                 CancelTarget::Encrypt => app.running_encrypt.is_some(),
                 CancelTarget::Export => app.active_export_job.is_some(),
+                // Only during Copying — see `RunningRepackJob`'s doc comment.
+                CancelTarget::Repack => app
+                    .active_repack_job
+                    .as_ref()
+                    .is_some_and(|j| j.control.phase() == pocketvault_core::RepackPhase::Copying),
             };
             if cancellable {
                 app.modal = Some(Modal::ConfirmCancelJob(target));
@@ -299,6 +304,12 @@ pub fn update(app: &mut PocketVault, message: Message) -> Task<Message> {
                 }
                 CancelTarget::Export => {
                     if let Some(job) = app.active_export_job.as_mut() {
+                        job.control.cancel.store(true, Ordering::Relaxed);
+                        job.cancelling = true;
+                    }
+                }
+                CancelTarget::Repack => {
+                    if let Some(job) = app.active_repack_job.as_mut() {
                         job.control.cancel.store(true, Ordering::Relaxed);
                         job.cancelling = true;
                     }
@@ -385,11 +396,58 @@ pub fn update(app: &mut PocketVault, message: Message) -> Task<Message> {
             completion_dialog(app.main_window, title, description)
         }
 
+        Message::OpenSettings => {
+            if app.session.is_some() && !app.any_job_active() {
+                app.modal = Some(Modal::Settings {
+                    custom_gib: String::new(),
+                });
+            }
+            Task::none()
+        }
+        Message::CustomSegmentGibChanged(s) => {
+            if let Some(Modal::Settings { custom_gib }) = &mut app.modal {
+                *custom_gib = s;
+            }
+            Task::none()
+        }
+        Message::ConfirmRepack {
+            new_target_bytes,
+            reclaim,
+        } => {
+            app.modal = None;
+            start_repack_job(app, new_target_bytes, reclaim)
+        }
+        Message::RepackJobFinished(outcome) => {
+            app.active_repack_job = None;
+            match outcome {
+                None => Task::none(),
+                Some((vault, Ok(()))) => {
+                    if let Some(session) = app.session.as_mut() {
+                        session.vault = vault;
+                    }
+                    Task::none()
+                }
+                Some((vault, Err(e))) => {
+                    if let Some(session) = app.session.as_mut() {
+                        session.vault = vault;
+                    }
+                    completion_dialog(app.main_window, "Repack Failed".to_string(), e)
+                }
+            }
+        }
+
         Message::PreviewWindowClosed(id) => window::close(id),
 
         Message::WindowClosed(id) => {
             if id == app.main_window {
-                iced::exit()
+                if app.active_repack_job.is_some() {
+                    // Blocks normal shutdown while segment processing is
+                    // active, per the feature doc — the one place in the app
+                    // this needs enforcing beyond the vault-browser lockout.
+                    Task::none()
+                } else {
+                    iced::exit()
+                }
             } else {
                 app.previews.remove(&id);
                 Task::none()
@@ -870,6 +928,44 @@ fn start_export_folder(
         let _ = tx.send(result);
     });
     Task::perform(async move { rx.await.ok() }, Message::ExportJobFinished)
+}
+
+/// Always runs as a background job, however small — a repack always touches
+/// every live item's location, unlike encrypt/export/delete's size-gated
+/// synchronous path, so there's no "small enough to just block" case here.
+fn start_repack_job(
+    app: &mut PocketVault,
+    new_target_bytes: Option<u64>,
+    reclaim: bool,
+) -> Task<Message> {
+    if app.any_job_active() {
+        return Task::none();
+    }
+    let session = match app.session.as_ref() {
+        Some(s) => s,
+        None => return Task::none(),
+    };
+    let vault = session.vault.clone();
+    let key = session.key.clone();
+    let total_bytes: u64 = vault.meta.files.iter().map(|f| f.length).sum();
+    let control = Arc::new(pocketvault_core::RepackControl::default());
+
+    app.active_repack_job = Some(RunningRepackJob {
+        control: control.clone(),
+        total_bytes,
+        cancelling: false,
+    });
+
+    let (tx, rx) = iced::futures::channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let mut vault = vault;
+        let result = vault
+            .repack(new_target_bytes, reclaim, &key, &control)
+            .map_err(|e| e.to_string());
+        let _ = tx.send((vault, result));
+    });
+
+    Task::perform(async move { rx.await.ok() }, Message::RepackJobFinished)
 }
 
 fn start_delete_file(app: &mut PocketVault, file_id: String) -> Task<Message> {

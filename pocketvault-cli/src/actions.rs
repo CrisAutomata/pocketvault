@@ -202,6 +202,30 @@ pub fn preview_item(session: &CliSession, item: &ListedItem) {
     }
 }
 
+/// Reorganizes the vault's segment layout to `new_target_bytes` (`None` =
+/// single-file mode). `reclaim` forces a repack even when the target size
+/// isn't changing, to compact dead space left behind by deletes.
+pub fn repack(
+    session: &mut CliSession,
+    cancel_slot: &CancelSlot,
+    new_target_bytes: Option<u64>,
+    reclaim: bool,
+) {
+    let total_bytes: u64 = session.vault.meta.files.iter().map(|f| f.length).sum();
+
+    let vault = session.vault.clone();
+    let key = session.key.clone();
+    let (new_vault, result) =
+        jobs::run_repack(vault, key, new_target_bytes, reclaim, total_bytes, cancel_slot);
+    session.vault = new_vault;
+
+    match result {
+        Ok(()) => log::ok("Vault reorganized."),
+        Err(VaultError::Cancelled) => log::warn("Cancelled — the vault is unchanged."),
+        Err(e) => log::fail(format!("Repack failed: {e}")),
+    }
+}
+
 pub fn change_password(session: &mut CliSession, old_password: &str, new_password: &str) {
     match session
         .vault

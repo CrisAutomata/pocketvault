@@ -10,6 +10,11 @@ use crate::message::Message;
 use crate::state::{PocketVault, Screen};
 
 pub fn main_window(app: &PocketVault) -> Element<'_, Message> {
+    if app.active_repack_job.is_some() {
+        // Replaces the whole vault browser — segment processing blocks
+        // everything, not just the browser's usual job banner+lockdown.
+        return vault_browser::repack_blocking_view(app);
+    }
     let base = match &app.screen {
         Screen::Auth(auth) => auth::view(auth),
         Screen::Vault => vault_browser::view(app),

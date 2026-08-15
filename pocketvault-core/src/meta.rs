@@ -20,11 +20,57 @@ pub struct VaultFolder {
     pub parent_id: Option<String>,
 }
 
+/// A file's encrypted `.pv` envelope (see `pv_format.rs`) lives at a byte
+/// range inside one of the vault's segment files rather than in a dedicated
+/// file of its own — `segment_index` + `offset` + `length` locate it there.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultFileEntry {
     pub id: String,
-    pub pv_filename: String,
     pub folder_id: Option<String>,
+    pub segment_index: u32,
+    pub offset: u64,
+    pub length: u64,
+}
+
+pub const GIB: u64 = 1024 * 1024 * 1024;
+pub const DEFAULT_SEGMENT_BYTES: u64 = 5 * GIB;
+
+/// `target_segment_bytes: None` means single-file/unbounded mode — the vault
+/// has exactly one segment that never finalizes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SegmentSettings {
+    pub target_segment_bytes: Option<u64>,
+}
+
+impl Default for SegmentSettings {
+    fn default() -> Self {
+        Self {
+            target_segment_bytes: Some(DEFAULT_SEGMENT_BYTES),
+        }
+    }
+}
+
+/// A closed (finalized) segment file. `filename` is stored explicitly rather
+/// than reconstructed from `cumulative_size` — it's set once at finalize time
+/// and never touched again, so later deletes (which don't rename anything)
+/// can't desync it. `cumulative_size` is a human-readable sanity check only
+/// (see the naming convention in the feature doc) — never authoritative.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SegmentEntry {
+    pub index: u32,
+    pub filename: String,
+    pub cumulative_size: u64,
+    pub file_size: u64,
+}
+
+/// The segment currently being appended to. `filename` is `"active.pv"` in
+/// segmented mode (renamed to its final name when finalized) or `"vault.pv"`
+/// in single-file mode (never finalizes, so never renamed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveSegmentInfo {
+    pub index: u32,
+    pub filename: String,
+    pub bytes_written: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +82,9 @@ pub struct VaultMeta {
     pub folders: Vec<VaultFolder>,
     pub files: Vec<VaultFileEntry>,
     pub metadata_preview: bool,
+    pub segment_settings: SegmentSettings,
+    pub segments: Vec<SegmentEntry>,
+    pub active_segment: Option<ActiveSegmentInfo>,
 }
 
 impl VaultMeta {
@@ -59,6 +108,9 @@ impl VaultMeta {
             folders: Vec::new(),
             files: Vec::new(),
             metadata_preview: true,
+            segment_settings: SegmentSettings::default(),
+            segments: Vec::new(),
+            active_segment: None,
         };
 
         Ok((meta, dek))
@@ -126,12 +178,20 @@ impl VaultMeta {
         id
     }
 
-    pub fn add_file(&mut self, pv_filename: &str, folder_id: Option<&str>) -> String {
+    pub fn add_file(
+        &mut self,
+        segment_index: u32,
+        offset: u64,
+        length: u64,
+        folder_id: Option<&str>,
+    ) -> String {
         let id = Uuid::new_v4().to_string();
         self.files.push(VaultFileEntry {
             id: id.clone(),
-            pv_filename: pv_filename.to_string(),
             folder_id: folder_id.map(str::to_string),
+            segment_index,
+            offset,
+            length,
         });
         id
     }
@@ -301,11 +361,12 @@ mod tests {
     #[test]
     fn add_and_remove_file() {
         let (mut meta, _) = VaultMeta::create_new("p").unwrap();
-        let id = meta.add_file("abc.pv", None);
+        let id = meta.add_file(1, 100, 10, None);
         assert_eq!(meta.files.len(), 1);
 
         let removed = meta.remove_file(&id).unwrap();
-        assert_eq!(removed.pv_filename, "abc.pv");
+        assert_eq!(removed.offset, 100);
+        assert_eq!(removed.length, 10);
         assert!(meta.files.is_empty());
     }
 
@@ -313,9 +374,9 @@ mod tests {
     fn remove_folder_cascades_to_files() {
         let (mut meta, _) = VaultMeta::create_new("p").unwrap();
         let folder_id = meta.add_folder("Photos", None);
-        meta.add_file("a.pv", Some(&folder_id));
-        meta.add_file("b.pv", Some(&folder_id));
-        meta.add_file("c.pv", None); // root file
+        meta.add_file(1, 0, 10, Some(&folder_id));
+        meta.add_file(1, 10, 10, Some(&folder_id));
+        meta.add_file(1, 20, 10, None); // root file
 
         let removed = meta.remove_folder(&folder_id);
         assert_eq!(removed.len(), 2);
@@ -328,28 +389,28 @@ mod tests {
         let root = meta.add_folder("asdasdad", None);
         let mid = meta.add_folder(".astro", Some(&root));
         let leaf = meta.add_folder("collections", Some(&mid));
-        meta.add_file("mid.pv", Some(&mid));
-        meta.add_file("leaf.pv", Some(&leaf));
-        meta.add_file("root_file.pv", None);
+        meta.add_file(1, 0, 10, Some(&mid));
+        meta.add_file(1, 10, 10, Some(&leaf));
+        meta.add_file(1, 20, 10, None);
 
         let removed = meta.remove_folder(&root);
-        let mut removed_names: Vec<&str> = removed.iter().map(|f| f.pv_filename.as_str()).collect();
-        removed_names.sort();
-        assert_eq!(removed_names, vec!["leaf.pv", "mid.pv"]);
+        let mut removed_offsets: Vec<u64> = removed.iter().map(|f| f.offset).collect();
+        removed_offsets.sort();
+        assert_eq!(removed_offsets, vec![0, 10]);
 
         // root, mid, and leaf are all gone; unrelated root file survives
         assert!(meta.folders.is_empty());
         assert_eq!(meta.files.len(), 1);
-        assert_eq!(meta.files[0].pv_filename, "root_file.pv");
+        assert_eq!(meta.files[0].offset, 20);
     }
 
     #[test]
     fn folder_file_count() {
         let (mut meta, _) = VaultMeta::create_new("p").unwrap();
         let id = meta.add_folder("Docs", None);
-        meta.add_file("x.pv", Some(&id));
-        meta.add_file("y.pv", Some(&id));
-        meta.add_file("z.pv", None);
+        meta.add_file(1, 0, 10, Some(&id));
+        meta.add_file(1, 10, 10, Some(&id));
+        meta.add_file(1, 20, 10, None);
 
         assert_eq!(meta.folder_file_count(&id), 2);
     }
@@ -358,8 +419,8 @@ mod tests {
     fn files_in_folder_root() {
         let (mut meta, _) = VaultMeta::create_new("p").unwrap();
         let id = meta.add_folder("F", None);
-        meta.add_file("a.pv", None);
-        meta.add_file("b.pv", Some(&id));
+        meta.add_file(1, 0, 10, None);
+        meta.add_file(1, 10, 10, Some(&id));
 
         assert_eq!(meta.files_in_folder(None).len(), 1);
         assert_eq!(meta.files_in_folder(Some(&id)).len(), 1);

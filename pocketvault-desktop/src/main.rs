@@ -42,6 +42,7 @@ fn boot() -> (PocketVault, Task<Message>) {
         encrypt_queue: std::collections::VecDeque::new(),
         active_delete_job: None,
         active_export_job: None,
+        active_repack_job: None,
         next_job_id: 0,
     };
 
@@ -66,7 +67,8 @@ fn subscription(app: &PocketVault) -> Subscription<Message> {
     // `state::RunningEncryptJob`) keeps visibly counting down.
     let any_job_running = app.running_encrypt.is_some()
         || app.active_delete_job.is_some()
-        || app.active_export_job.is_some();
+        || app.active_export_job.is_some()
+        || app.active_repack_job.is_some();
     if any_job_running {
         subs.push(iced::time::every(std::time::Duration::from_millis(300)).map(|_| Message::Tick));
     }

@@ -32,9 +32,11 @@ pub fn wrap<'a>(base: Element<'a, Message>, app: &'a PocketVault) -> Element<'a,
                         .map(|j| j.label.as_str())
                         .unwrap_or("this job"),
                 ),
+                CancelTarget::Repack => ("reorganizing", "the vault"),
             };
             confirm_cancel_job_card(verb, label, *target)
         }
+        Some(Modal::Settings { custom_gib }) => settings_card(app, custom_gib),
     };
 
     let overlay = container(card)
@@ -180,6 +182,104 @@ fn confirm_cancel_job_card<'a>(
                 Message::ConfirmCancelJob(target),
                 true,
             ))
+            .width(Length::Fill)
+            .align_x(Horizontal::Right),
+        ],
+    )
+}
+
+/// A segment-size preset button: label plus its estimated segment count for
+/// the current vault size, e.g. "5 GiB — ~70 segments".
+fn preset_button<'a>(label: &str, vault_size: u64, bytes: u64) -> Element<'a, Message> {
+    let estimate = crate::state::estimate_segment_count(vault_size, Some(bytes));
+    button(
+        text(format!("{label} — {estimate} segments"))
+            .size(13)
+            .color(theme::text()),
+    )
+    .width(Length::Fill)
+    .padding([8, 12])
+    .style(|_theme, status| theme::secondary_button(status))
+    .on_press(Message::ConfirmRepack {
+        new_target_bytes: Some(bytes),
+        reclaim: false,
+    })
+    .into()
+}
+
+/// "Storage → Segment Size": shows the vault's current segment setting and
+/// an estimated count, lets the user pick a new size (presets, a custom GiB
+/// value, or single-file), or force a reclaim without changing the size.
+fn settings_card<'a>(app: &'a PocketVault, custom_gib: &'a str) -> Element<'a, Message> {
+    let Some(session) = &app.session else {
+        return modal_shell(100.0, column![text("No vault open.").size(13)]);
+    };
+    let current = session.vault.meta.segment_settings.target_segment_bytes;
+    let vault_size = crate::state::vault_total_size(session);
+
+    let custom_apply = custom_gib
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|n| *n > 0)
+        .map(|n| Message::ConfirmRepack {
+            new_target_bytes: Some(n * pocketvault_core::GIB),
+            reclaim: false,
+        });
+
+    modal_shell(
+        440.0,
+        column![
+            text("Storage").size(15).color(theme::text()),
+            text(format!("Vault size: {}", crate::state::format_size(vault_size)))
+                .size(12)
+                .color(theme::text_secondary()),
+            text(format!(
+                "Current: {} ({} segments)",
+                crate::state::describe_segment_size(current),
+                crate::state::estimate_segment_count(vault_size, current),
+            ))
+            .size(12)
+            .color(theme::text_secondary()),
+            preset_button("1 GiB", vault_size, pocketvault_core::GIB),
+            preset_button("5 GiB", vault_size, 5 * pocketvault_core::GIB),
+            preset_button("10 GiB", vault_size, 10 * pocketvault_core::GIB),
+            preset_button("20 GiB", vault_size, 20 * pocketvault_core::GIB),
+            row![
+                text_input("Custom GiB", custom_gib)
+                    .size(13)
+                    .padding([8, 10])
+                    .style(theme::text_field)
+                    .on_input(Message::CustomSegmentGibChanged),
+                button(text("Apply").size(13))
+                    .padding([8, 12])
+                    .style(|_theme, status| theme::secondary_button(status))
+                    .on_press_maybe(custom_apply),
+            ]
+            .spacing(8)
+            .align_y(Vertical::Center),
+            button(text("Single File").size(13))
+                .width(Length::Fill)
+                .padding([8, 12])
+                .style(|_theme, status| theme::secondary_button(status))
+                .on_press(Message::ConfirmRepack {
+                    new_target_bytes: None,
+                    reclaim: false,
+                }),
+            button(text("Reclaim Space (keep current size)").size(13))
+                .width(Length::Fill)
+                .padding([8, 12])
+                .style(|_theme, status| theme::secondary_button(status))
+                .on_press(Message::ConfirmRepack {
+                    new_target_bytes: current,
+                    reclaim: true,
+                }),
+            container(
+                button(text("Close").size(13))
+                    .padding([8, 16])
+                    .style(|_theme, status| theme::secondary_button(status))
+                    .on_press(Message::CancelModal)
+            )
             .width(Length::Fill)
             .align_x(Horizontal::Right),
         ],

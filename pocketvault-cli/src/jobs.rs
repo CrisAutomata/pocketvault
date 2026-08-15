@@ -12,16 +12,35 @@ use std::time::{Duration, Instant};
 
 use indicatif::{ProgressBar, ProgressStyle};
 
-use pocketvault_core::{JobControl, Result, Vault, VaultKey};
+use pocketvault_core::{JobControl, RepackControl, RepackPhase, Result, Vault, VaultKey};
 
 pub const BIG_JOB_THRESHOLD_BYTES: u64 = 100 * 1024 * 1024;
 
-/// Holds the `JobControl` of whatever job is currently running, if any, so
-/// the process-wide Ctrl-C handler (installed once at startup) has something
-/// to cancel. `None` while idle — at the REPL prompt, Ctrl-C never reaches
-/// this handler at all (the line editor consumes it as a plain keypress), so
-/// leaving this empty during idle time is never observed.
-pub type CancelSlot = Arc<Mutex<Option<Arc<JobControl>>>>;
+/// Something the process-wide Ctrl-C handler can cancel — implemented by both
+/// `JobControl` (encrypt/export) and `RepackControl` (repack), so a single
+/// `CancelSlot` can hold whichever kind of job is currently running.
+pub trait Cancellable: Send + Sync {
+    fn request_cancel(&self);
+}
+
+impl Cancellable for JobControl {
+    fn request_cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Cancellable for RepackControl {
+    fn request_cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Holds whatever job is currently running, if any, so the process-wide
+/// Ctrl-C handler (installed once at startup) has something to cancel. `None`
+/// while idle — at the REPL prompt, Ctrl-C never reaches this handler at all
+/// (the line editor consumes it as a plain keypress), so leaving this empty
+/// during idle time is never observed.
+pub type CancelSlot = Arc<Mutex<Option<Arc<dyn Cancellable>>>>;
 
 /// Installs a process-wide SIGINT handler that cancels whatever job is
 /// currently registered in the returned slot. Ignored (not treated as fatal)
@@ -32,7 +51,7 @@ pub fn install_ctrlc_handler() -> CancelSlot {
     let _ = ctrlc::set_handler(move || {
         if let Ok(guard) = slot_for_handler.lock() {
             if let Some(control) = guard.as_ref() {
-                control.cancel.store(true, Ordering::Relaxed);
+                control.request_cancel();
             }
         }
     });
@@ -125,6 +144,75 @@ where
     }
 
     handle.join().expect("job thread panicked")
+}
+
+fn phase_label(phase: RepackPhase) -> &'static str {
+    match phase {
+        RepackPhase::Copying => "Reorganizing",
+        RepackPhase::Verifying => "Verifying",
+        RepackPhase::Committing => "Committing",
+    }
+}
+
+/// Same shape as `with_progress`, but for a repack: always shown with a
+/// progress bar (repacks are never small enough to bother with a spinner),
+/// cancellable only during the `Copying` phase (see `RepackControl`) — once
+/// verify/commit starts the message drops the "Ctrl-C to cancel" hint.
+fn with_repack_progress<T, F>(total_bytes: u64, cancel_slot: &CancelSlot, op: F) -> T
+where
+    T: Send + 'static,
+    F: FnOnce(Arc<RepackControl>) -> T + Send + 'static,
+{
+    let control = Arc::new(RepackControl::default());
+    if let Ok(mut guard) = cancel_slot.lock() {
+        *guard = Some(control.clone());
+    }
+
+    let pb = ProgressBar::new(total_bytes.max(1));
+    if let Ok(style) = ProgressStyle::with_template(
+        "{spinner:.cyan} {msg} [{bar:30.cyan/blue}] {bytes}/{total_bytes}",
+    ) {
+        pb.set_style(style.progress_chars("=> "));
+    }
+
+    let control_for_thread = control.clone();
+    let handle = std::thread::spawn(move || op(control_for_thread));
+
+    while !handle.is_finished() {
+        let phase = control.phase();
+        let msg = if phase == RepackPhase::Copying {
+            format!("{} vault — Ctrl-C to cancel", phase_label(phase))
+        } else {
+            format!("{} vault", phase_label(phase))
+        };
+        pb.set_message(msg);
+        pb.set_position(control.bytes_done.load(Ordering::Relaxed).min(total_bytes));
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    pb.finish_and_clear();
+
+    if let Ok(mut guard) = cancel_slot.lock() {
+        *guard = None;
+    }
+
+    handle.join().expect("job thread panicked")
+}
+
+/// Repacks `vault`'s segment layout to `new_target_bytes`, returning the
+/// (possibly unchanged, on error/cancel) vault alongside the outcome — same
+/// "vault always comes back" shape as `run_encrypt`.
+pub fn run_repack(
+    mut vault: Vault,
+    key: VaultKey,
+    new_target_bytes: Option<u64>,
+    reclaim: bool,
+    total_bytes: u64,
+    cancel_slot: &CancelSlot,
+) -> (Vault, Result<()>) {
+    with_repack_progress(total_bytes, cancel_slot, move |control| {
+        let result = vault.repack(new_target_bytes, reclaim, &key, &control);
+        (vault, result)
+    })
 }
 
 /// Encrypts `input` into `vault`, returning the (possibly rolled-back, but
@@ -316,5 +404,66 @@ pub fn finish_job(job: RunningJob, cancel_slot: &CancelSlot) {
         if let Ok(mut guard) = cancel_slot.lock() {
             *guard = None;
         }
+    }
+}
+
+// ── Non-blocking repack job — used by the full-screen `tui` UI ─────────
+//
+// Separate from `RunningJob`/`JobOutcome` above (rather than folded in)
+// because a repack polls a `RepackControl` (cancel + bytes_done + phase),
+// not a plain `JobControl` — the phase is what lets the UI show
+// "Reorganizing…"/"Verifying…"/"Committing…" instead of just a percentage.
+
+pub enum RepackOutcome {
+    Repack(Vault, Result<()>),
+}
+
+pub struct RunningRepackJob {
+    pub control: Arc<RepackControl>,
+    pub total_bytes: u64,
+    receiver: Receiver<RepackOutcome>,
+}
+
+impl RunningRepackJob {
+    /// Non-blocking: `None` while the background thread is still working.
+    pub fn poll(&self) -> Option<RepackOutcome> {
+        self.receiver.try_recv().ok()
+    }
+}
+
+pub fn start_repack(
+    vault: Vault,
+    key: VaultKey,
+    new_target_bytes: Option<u64>,
+    reclaim: bool,
+    total_bytes: u64,
+    cancel_slot: &CancelSlot,
+) -> RunningRepackJob {
+    let control = Arc::new(RepackControl::default());
+    if let Ok(mut guard) = cancel_slot.lock() {
+        *guard = Some(control.clone());
+    }
+
+    let (tx, rx) = mpsc::channel();
+    let control_for_thread = control.clone();
+    std::thread::spawn(move || {
+        let mut vault = vault;
+        let result = vault.repack(new_target_bytes, reclaim, &key, &control_for_thread);
+        let _ = tx.send(RepackOutcome::Repack(vault, result));
+    });
+
+    RunningRepackJob {
+        control,
+        total_bytes,
+        receiver: rx,
+    }
+}
+
+/// Clears a finished repack job's `RepackControl` registration — a repack is
+/// always registered (unlike `RunningJob`'s size-gated `big` flag), since
+/// it's never small enough to skip Ctrl-C handling.
+pub fn finish_repack_job(_job: RunningRepackJob, cancel_slot: &CancelSlot) {
+    if let Ok(mut guard) = cancel_slot.lock() {
+        *guard = None;
     }
 }

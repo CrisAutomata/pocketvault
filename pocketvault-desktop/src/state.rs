@@ -6,7 +6,7 @@ use std::{
 };
 
 use iced::window;
-use pocketvault_core::{JobControl, PvMetadata, Vault, VaultKey};
+use pocketvault_core::{JobControl, PvMetadata, RepackControl, Vault, VaultKey};
 
 /// Encrypt/export/delete jobs at or above this size run as a background job
 /// (status banner, cancel-where-applicable) instead of blocking the UI thread
@@ -119,6 +119,18 @@ pub struct RunningExportJob {
     pub cancelling: bool,
 }
 
+/// The single currently-executing repack (segment reorganization) job. Unlike
+/// the other job kinds, this one may only start when `!any_job_active()` and,
+/// once running, blocks everything else in the vault browser (see
+/// `PocketVault::any_job_active`) rather than allowing anything to queue
+/// behind it — a repack changes every file's physical location, so no other
+/// vault-mutating operation can safely run concurrently with it.
+pub struct RunningRepackJob {
+    pub control: Arc<RepackControl>,
+    pub total_bytes: u64,
+    pub cancelling: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
     Unlock,
@@ -166,15 +178,22 @@ pub enum Modal {
         folder_id: Option<String>,
     },
     ConfirmCancelJob(CancelTarget),
+    /// Storage → Segment Size picker. `custom_gib` is the text field's raw
+    /// (unvalidated) input for the "Custom" size option.
+    Settings {
+        custom_gib: String,
+    },
 }
 
-/// Which running job a pending "confirm cancel" modal refers to — encrypt and
-/// export can be active at the same time (export is independent of the
-/// encrypt pool), so a bare "cancel the job" isn't enough to disambiguate.
+/// Which running job a pending "confirm cancel" modal refers to — encrypt,
+/// export, and repack can each be active (encrypt/export together at most;
+/// repack only ever alone — see `RunningRepackJob`), so a bare "cancel the
+/// job" isn't enough to disambiguate.
 #[derive(Debug, Clone, Copy)]
 pub enum CancelTarget {
     Encrypt,
     Export,
+    Repack,
 }
 
 pub struct PreviewData {
@@ -226,6 +245,7 @@ pub struct PocketVault {
     pub encrypt_queue: VecDeque<QueuedEncryptJob>,
     pub active_delete_job: Option<RunningDeleteJob>,
     pub active_export_job: Option<RunningExportJob>,
+    pub active_repack_job: Option<RunningRepackJob>,
     pub next_job_id: u64,
 }
 
@@ -244,10 +264,16 @@ impl PocketVault {
     /// Export/Preview are held back here, even though they're technically
     /// safe (read-only) — this is a UX choice for a single, easy-to-reason-
     /// about "busy" state rather than a strict safety requirement.
+    ///
+    /// A repack is the strictest case: it may only *start* when this is
+    /// false, and while `active_repack_job` is set, the vault browser isn't
+    /// even rendered (see `view::main_window`) — nothing can queue behind it,
+    /// unlike encrypt jobs, because every file's physical location changes.
     pub fn any_job_active(&self) -> bool {
         self.encrypt_pool_busy()
             || self.active_delete_job.is_some()
             || self.active_export_job.is_some()
+            || self.active_repack_job.is_some()
     }
 }
 
@@ -319,6 +345,24 @@ pub fn eta_label(job: &RunningEncryptJob) -> String {
         format!("~{eta_secs}s remaining")
     } else {
         format!("~{}m {}s remaining", eta_secs / 60, eta_secs % 60)
+    }
+}
+
+/// "5.0 GB" or "Single File" — shown in the Storage settings card.
+pub fn describe_segment_size(target: Option<u64>) -> String {
+    match target {
+        Some(bytes) => format_size(bytes),
+        None => "Single File".to_string(),
+    }
+}
+
+/// "~N" segments (or "1 (single file)") for a vault of `vault_size` bytes
+/// under `target` — a human sanity-check estimate only, per the feature doc.
+pub fn estimate_segment_count(vault_size: u64, target: Option<u64>) -> String {
+    match target {
+        None => "1 (single file)".to_string(),
+        Some(0) => "—".to_string(),
+        Some(bytes) => format!("~{}", vault_size.div_ceil(bytes).max(1)),
     }
 }
 

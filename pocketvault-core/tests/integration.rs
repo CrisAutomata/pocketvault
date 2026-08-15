@@ -159,7 +159,7 @@ fn batch_encrypt_and_export() {
 // ── Delete ────────────────────────────────────────────────────────────────────
 
 #[test]
-fn delete_removes_pv_from_disk() {
+fn delete_removes_manifest_entry() {
     let dir = TempDir::new().unwrap();
     let src = TempDir::new().unwrap();
 
@@ -171,10 +171,11 @@ fn delete_removes_pv_from_disk() {
     let fid = vault
         .encrypt_file(&p, None, &key, &JobControl::default())
         .unwrap();
-    let pv_path = vault.vault_dir().join(&vault.meta.files[0].pv_filename);
-    assert!(pv_path.exists());
+    assert_eq!(vault.meta.files.len(), 1);
 
     vault.delete_file(&fid).unwrap();
     assert!(vault.meta.files.is_empty());
-    assert!(!pv_path.exists());
+    // The deleted item's bytes remain inside its segment file as dead space
+    // until an explicit repack (see `SegmentStore::repack`) — deleting no
+    // longer touches disk directly, since segments are shared across items.
 }

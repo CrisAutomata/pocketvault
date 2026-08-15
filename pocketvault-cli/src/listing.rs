@@ -36,7 +36,7 @@ pub fn build_listing(vault: &Vault, key: &VaultKey, folder_id: Option<&str>) -> 
         let name = vault
             .read_metadata(&f.id, key)
             .map(|m| m.original_name)
-            .unwrap_or_else(|_| f.pv_filename.clone());
+            .unwrap_or_else(|_| format!("(unreadable: {})", f.id));
         ListedItem {
             kind: ItemKind::File,
             id: f.id.clone(),
@@ -86,6 +86,41 @@ pub fn path_string(session: &CliSession) -> String {
 
 /// Recursive, decrypted-size total for everything under `folder_id` — used
 /// to decide whether exporting/deleting a folder counts as a "big" job.
+/// "5.0 GB" or "Single File" — shared by the menu and full-screen Settings
+/// screens so the wording never drifts between them.
+pub fn describe_segment_size(target: Option<u64>) -> String {
+    match target {
+        Some(bytes) => format_size(bytes),
+        None => "Single File".to_string(),
+    }
+}
+
+/// "~N" segments (or "1 (single file)") for a vault of `vault_size` bytes
+/// under `target` — a human sanity-check estimate only, per the feature doc.
+pub fn estimate_segment_count(vault_size: u64, target: Option<u64>) -> String {
+    match target {
+        None => "1 (single file)".to_string(),
+        Some(0) => "—".to_string(),
+        Some(bytes) => format!("~{}", vault_size.div_ceil(bytes).max(1)),
+    }
+}
+
+/// Total logical (plaintext) bytes across every file in the vault, regardless
+/// of folder — used by the Settings screen to estimate segment counts.
+pub fn vault_total_size(vault: &Vault, key: &VaultKey) -> u64 {
+    vault
+        .meta
+        .files
+        .iter()
+        .map(|f| {
+            vault
+                .read_metadata(&f.id, key)
+                .map(|m| m.original_size)
+                .unwrap_or(0)
+        })
+        .sum()
+}
+
 pub fn folder_total_size(vault: &Vault, key: &VaultKey, folder_id: &str) -> u64 {
     let mut total: u64 = vault
         .files_in_folder(Some(folder_id))

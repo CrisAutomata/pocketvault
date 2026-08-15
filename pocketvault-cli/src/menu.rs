@@ -45,7 +45,7 @@ pub fn run(session: &mut CliSession, cancel_slot: &CancelSlot) -> MenuOutcome {
             1 => encrypt_folder_flow(session, cancel_slot),
             2 => browse(session, cancel_slot),
             3 => {
-                if let SettingsOutcome::Lock = settings(session) {
+                if let SettingsOutcome::Lock = settings(session, cancel_slot) {
                     return MenuOutcome::Lock;
                 }
             }
@@ -261,8 +261,8 @@ enum SettingsOutcome {
     Lock,
 }
 
-fn settings(session: &mut CliSession) -> SettingsOutcome {
-    const OPTIONS: &[&str] = &["Change Password", "Lock Vault", "Back"];
+fn settings(session: &mut CliSession, cancel_slot: &CancelSlot) -> SettingsOutcome {
+    const OPTIONS: &[&str] = &["Change Password", "Storage", "Lock Vault", "Back"];
     loop {
         println!();
         println!("{}", "Settings".bold().cyan());
@@ -271,9 +271,95 @@ fn settings(session: &mut CliSession) -> SettingsOutcome {
         };
         match idx {
             0 => change_password_flow(session),
-            1 => return SettingsOutcome::Lock,
-            2 => return SettingsOutcome::Back,
+            1 => storage_flow(session, cancel_slot),
+            2 => return SettingsOutcome::Lock,
+            3 => return SettingsOutcome::Back,
             _ => unreachable!(),
+        }
+    }
+}
+
+const SEGMENT_SIZE_CHOICES: &[&str] = &[
+    "1 GiB",
+    "5 GiB",
+    "10 GiB",
+    "20 GiB",
+    "Custom",
+    "Single File",
+    "Reclaim Space (compact deleted files, keep current size)",
+    "Back",
+];
+
+/// "Storage → Segment Size" — shows the vault's current segment setting plus
+/// an estimated segment count, lets the user pick a new size (or force a
+/// reclaim without changing it), and runs the repack as a blocking job.
+fn storage_flow(session: &mut CliSession, cancel_slot: &CancelSlot) {
+    loop {
+        let current = session.vault.meta.segment_settings.target_segment_bytes;
+        let vault_size = listing::vault_total_size(&session.vault, &session.key);
+
+        println!();
+        println!("{}", "Storage".bold().cyan());
+        println!("Vault size: {}", listing::format_size(vault_size));
+        println!("Segment size: {}", listing::describe_segment_size(current));
+        println!(
+            "Estimated segments: {}",
+            listing::estimate_segment_count(vault_size, current)
+        );
+
+        let Some(idx) = select("Change segment size", SEGMENT_SIZE_CHOICES) else {
+            return;
+        };
+
+        let new_target = match idx {
+            0 => Some(pocketvault_core::GIB),
+            1 => Some(5 * pocketvault_core::GIB),
+            2 => Some(10 * pocketvault_core::GIB),
+            3 => Some(20 * pocketvault_core::GIB),
+            4 => {
+                let Some(raw) = input("Custom segment size, in GiB") else {
+                    continue;
+                };
+                match raw.trim().parse::<u64>() {
+                    Ok(n) if n > 0 => Some(n * pocketvault_core::GIB),
+                    _ => {
+                        log::fail("Enter a positive whole number of GiB.");
+                        continue;
+                    }
+                }
+            }
+            5 => None,
+            6 => {
+                let proceed = Confirm::with_theme(&menu_theme())
+                    .with_prompt(
+                        "Reclaim dead space from deleted files, keeping the current segment size?",
+                    )
+                    .default(false)
+                    .interact()
+                    .unwrap_or(false);
+                if proceed {
+                    actions::repack(session, cancel_slot, current, true);
+                }
+                continue;
+            }
+            7 => return,
+            _ => unreachable!(),
+        };
+
+        println!(
+            "New estimate: {} segment(s).",
+            listing::estimate_segment_count(vault_size, new_target)
+        );
+        let proceed = Confirm::with_theme(&menu_theme())
+            .with_prompt(
+                "Reorganize the vault now? This can take a while for large vaults \
+                 and shouldn't be interrupted once verification starts.",
+            )
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+        if proceed {
+            actions::repack(session, cancel_slot, new_target, false);
         }
     }
 }

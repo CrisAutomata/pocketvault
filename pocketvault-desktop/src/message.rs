@@ -49,11 +49,27 @@ pub enum Message {
 
     CancelModal,
 
+    // Storage → Segment Size
+    /// Opens the segment-size picker modal (only while a session is unlocked
+    /// and no other job is active — see `PocketVault::any_job_active`).
+    OpenSettings,
+    /// The "Custom" size field's raw text (validated on submit, not as-typed).
+    CustomSegmentGibChanged(String),
+    /// Starts a repack toward `new_target_bytes` (`None` = single-file mode).
+    /// `reclaim` forces a repack even when the target isn't changing, to
+    /// compact dead space left behind by deletes.
+    ConfirmRepack {
+        new_target_bytes: Option<u64>,
+        reclaim: bool,
+    },
+
     // Background vault jobs: one encrypt job runs at a time (more just queue
     // up — see `state::PocketVault::encrypt_queue`), one delete job, one
-    // export job. While any of these is active, everything else in the vault
-    // browser is disabled except cancelling/removing a job and queueing more
-    // encrypts (see `PocketVault::any_job_active`).
+    // export job, one repack job. While any of these is active, everything
+    // else in the vault browser is disabled except cancelling/removing a job
+    // and queueing more encrypts (see `PocketVault::any_job_active`) — a
+    // repack additionally blocks the vault browser from rendering at all
+    // (see `view::main_window`).
     RequestCancelJob(CancelTarget),
     ConfirmCancelJob(CancelTarget),
     /// Removes a not-yet-started job from the encrypt queue.
@@ -67,6 +83,9 @@ pub enum Message {
     DeleteJobFinished(Option<(Vault, Result<Vec<String>, String>)>),
     /// Export jobs are read-only — nothing to swap back, just the outcome.
     ExportJobFinished(Option<Result<PathBuf, String>>),
+    /// The running repack finished — the (possibly unchanged, on error/
+    /// cancel) vault clone comes back and gets swapped into the session.
+    RepackJobFinished(Option<(Vault, Result<(), String>)>),
 
     // Preview window
     PreviewWindowClosed(window::Id),

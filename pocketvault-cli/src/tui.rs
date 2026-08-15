@@ -25,11 +25,14 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::{Frame, Terminal};
 
-use pocketvault_core::VaultError;
+use pocketvault_core::{RepackPhase, VaultError};
 
 use crate::actions;
 use crate::input::InputBox;
-use crate::jobs::{self, CancelSlot, EncryptInput, ExportTarget, JobOutcome, RunningJob};
+use crate::jobs::{
+    self, CancelSlot, EncryptInput, ExportTarget, JobOutcome, RepackOutcome, RunningJob,
+    RunningRepackJob,
+};
 use crate::listing::{self, ItemKind, ListedItem};
 use crate::log::{self, Severity};
 use crate::session::CliSession;
@@ -68,6 +71,9 @@ enum Pending {
     RenameInput {
         folder_id: String,
     },
+    /// Typed answer to "storage": a number of GiB, `"single"`, or `"reclaim"`
+    /// (see `parse_segment_size_answer`).
+    SegmentSizeInput,
 }
 
 /// One entry in the arrow-navigable listing: the two control rows are always
@@ -86,6 +92,7 @@ struct App<'a> {
     body: Body,
     status: (Severity, String),
     job: Option<RunningJob>,
+    repack_job: Option<RunningRepackJob>,
     pending: Option<Pending>,
     /// Index into `build_rows(app)` — which row is highlighted.
     selected: usize,
@@ -94,8 +101,8 @@ struct App<'a> {
 }
 
 const COMMANDS: &[&str] = &[
-    "ls", "cd", "pwd", "mkdir", "rename", "rm", "encrypt", "export", "cat", "passwd", "menu",
-    "lock", "exit", "help",
+    "ls", "cd", "pwd", "mkdir", "rename", "rm", "encrypt", "export", "cat", "passwd", "storage",
+    "menu", "lock", "exit", "help",
 ];
 
 const HELP_TEXT: &str = "\
@@ -108,6 +115,7 @@ encrypt <path> [...]      Encrypt file(s), or one folder, into the vault here
 export <name> <dest>      Decrypt a file or folder out to disk
 cat <name>                Preview a file in your OS's default app for it
 passwd                    Change the master password
+storage                   View/change the segment size (or 'reclaim' dead space)
 menu                      Switch to the menu-driven UI
 lock / exit               Lock the vault / leave PocketVault
 
@@ -162,6 +170,7 @@ pub fn run(session: &mut CliSession, cancel_slot: &CancelSlot) -> TuiOutcome {
                 .to_string(),
         ),
         job: None,
+        repack_job: None,
         pending: None,
         selected: 0,
         frame: 0,
@@ -174,6 +183,11 @@ pub fn run(session: &mut CliSession, cancel_slot: &CancelSlot) -> TuiOutcome {
             let job = app.job.take().expect("polled job must exist");
             jobs::finish_job(job, app.cancel_slot);
             apply_job_outcome(&mut app, outcome);
+        }
+        if let Some(outcome) = app.repack_job.as_ref().and_then(RunningRepackJob::poll) {
+            let job = app.repack_job.take().expect("polled repack job must exist");
+            jobs::finish_repack_job(job, app.cancel_slot);
+            apply_repack_outcome(&mut app, outcome);
         }
 
         let _ = terminal.draw(|f| draw(f, &app));
@@ -341,6 +355,20 @@ fn draw_body(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
+    if let Some(job) = &app.repack_job {
+        lines.push(Line::from(
+            "Segment is processing — reorganizing your vault.",
+        ));
+        lines.push(Line::from(""));
+        lines.push(Line::from(repack_progress_text(app, job)));
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            "Please do not close the application or disconnect the storage device.",
+        ));
+        f.render_widget(Paragraph::new(lines), area);
+        return;
+    }
+
     if let Some(Pending::RowActions {
         item,
         options,
@@ -453,6 +481,38 @@ fn eta_text(job: &RunningJob, done: u64) -> String {
     }
 }
 
+fn repack_progress_text(app: &App, job: &RunningRepackJob) -> String {
+    let spin = SPINNER[app.frame as usize % SPINNER.len()];
+    let phase_label = match job.control.phase() {
+        RepackPhase::Copying => "Reorganizing",
+        RepackPhase::Verifying => "Verifying",
+        RepackPhase::Committing => "Committing",
+    };
+    let done = job
+        .control
+        .bytes_done
+        .load(Ordering::Relaxed)
+        .min(job.total_bytes);
+    let bar_width = 24usize;
+    let filled = if job.total_bytes == 0 {
+        0
+    } else {
+        (done as usize * bar_width) / job.total_bytes as usize
+    };
+    let cancel_hint = if job.control.phase() == RepackPhase::Copying {
+        " — Ctrl-C to cancel"
+    } else {
+        ""
+    };
+    format!(
+        "{spin} {phase_label}… [{}{}] {}/{}{cancel_hint}",
+        "=".repeat(filled),
+        " ".repeat(bar_width - filled),
+        listing::format_size(done),
+        listing::format_size(job.total_bytes),
+    )
+}
+
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let (severity, message) = &app.status;
     let color = match severity {
@@ -476,6 +536,9 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
             format!("Export '{}' to which folder on disk? ", item.name)
         }
         Some(Pending::RenameInput { .. }) => "New name: ".to_string(),
+        Some(Pending::SegmentSizeInput) => {
+            "New segment size (GiB), 'single', or 'reclaim': ".to_string()
+        }
         Some(Pending::RowActions { .. }) | None => {
             format!("vault:{}> ", listing::path_string(app.session))
         }
@@ -505,6 +568,19 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             }
         }
         return; // everything else waits for the job to finish
+    }
+    if let Some(job) = &app.repack_job {
+        // Blocks everything, including Ctrl-X/Ctrl-L (lock/exit) — the doc's
+        // "no normal shutdown while processing" requirement, for free, since
+        // this early return runs before those are checked below. Cancelling
+        // is only honored during the Copying phase (see `RepackControl`).
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('c')
+            && job.control.phase() == RepackPhase::Copying
+        {
+            job.control.cancel.store(true, Ordering::Relaxed);
+        }
+        return;
     }
 
     if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -670,10 +746,52 @@ fn handle_pending(app: &mut App, pending: Pending, answer: String) {
             apply_log(app);
             refresh_listing(app);
         }
+        Pending::SegmentSizeInput => {
+            let answer = answer.trim();
+            if answer.is_empty() {
+                app.status = (Severity::Warn, "Cancelled.".to_string());
+                return;
+            }
+            let current = app.session.vault.meta.segment_settings.target_segment_bytes;
+            match answer.to_lowercase().as_str() {
+                "reclaim" => start_repack_job(app, current, true),
+                "single" => start_repack_job(app, None, false),
+                _ => match answer.parse::<u64>() {
+                    Ok(n) if n > 0 => {
+                        start_repack_job(app, Some(n * pocketvault_core::GIB), false)
+                    }
+                    _ => {
+                        app.status = (
+                            Severity::Fail,
+                            "Enter a positive whole number of GiB, 'single', or 'reclaim'."
+                                .to_string(),
+                        );
+                    }
+                },
+            }
+        }
         Pending::RowActions { .. } => {
             unreachable!("RowActions is handled by handle_row_actions_key, not submit()")
         }
     }
+}
+
+/// Kicks off a repack as a non-blocking background job — shared by the
+/// `storage` command's typed-size answer above.
+fn start_repack_job(app: &mut App, new_target_bytes: Option<u64>, reclaim: bool) {
+    let total_bytes: u64 = app.session.vault.meta.files.iter().map(|f| f.length).sum();
+    let vault = app.session.vault.clone();
+    let key = app.session.key.clone();
+    let job = jobs::start_repack(
+        vault,
+        key,
+        new_target_bytes,
+        reclaim,
+        total_bytes,
+        app.cancel_slot,
+    );
+    app.repack_job = Some(job);
+    app.status = (Severity::Ok, "Reorganizing vault…".to_string());
 }
 
 fn apply_log(app: &mut App) {
@@ -727,6 +845,18 @@ fn apply_job_outcome(app: &mut App, outcome: JobOutcome) {
     refresh_listing(app);
 }
 
+fn apply_repack_outcome(app: &mut App, outcome: RepackOutcome) {
+    let RepackOutcome::Repack(vault, result) = outcome;
+    app.session.vault = vault;
+    app.status = match result {
+        Ok(()) => (Severity::Ok, "Vault reorganized.".to_string()),
+        Err(VaultError::Cancelled) => {
+            (Severity::Warn, "Cancelled — the vault is unchanged.".to_string())
+        }
+        Err(e) => (Severity::Fail, format!("Repack failed: {e}")),
+    };
+}
+
 // ── Commands ─────────────────────────────────────────────────────────────
 
 fn run_command(app: &mut App, line: &str) {
@@ -761,6 +891,7 @@ fn run_command(app: &mut App, line: &str) {
             app.input.set_masked(true);
             app.status = (Severity::Ok, "Changing master password.".to_string());
         }
+        "storage" => cmd_storage(app),
         "help" | "?" => app.body = Body::Help,
         "lock" => app.outcome = Some(TuiOutcome::Lock),
         "menu" | "ui" => app.outcome = Some(TuiOutcome::UseMenu),
@@ -805,6 +936,24 @@ fn cmd_cd(app: &mut App, rest: &[String]) {
         Severity::Ok,
         format!("Now in {}", listing::path_string(app.session)),
     );
+}
+
+/// "Storage → Segment Size" for the full-screen UI: shows the current
+/// setting + an estimate, then waits for a typed answer (a number of GiB,
+/// `single`, or `reclaim`) via `Pending::SegmentSizeInput`.
+fn cmd_storage(app: &mut App) {
+    let current = app.session.vault.meta.segment_settings.target_segment_bytes;
+    let vault_size = listing::vault_total_size(&app.session.vault, &app.session.key);
+    app.status = (
+        Severity::Ok,
+        format!(
+            "Vault {} — segment size {} ({} segments). Enter a new size in GiB, 'single', or 'reclaim'.",
+            listing::format_size(vault_size),
+            listing::describe_segment_size(current),
+            listing::estimate_segment_count(vault_size, current),
+        ),
+    );
+    app.pending = Some(Pending::SegmentSizeInput);
 }
 
 fn cmd_mkdir(app: &mut App, rest: &[String]) {

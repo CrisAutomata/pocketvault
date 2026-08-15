@@ -1,7 +1,8 @@
 use std::collections::HashSet;
+use std::sync::atomic::Ordering;
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, progress_bar, row, scrollable, text};
 use iced::{Element, Length};
 
 use crate::message::Message;
@@ -9,9 +10,82 @@ use crate::state::{
     eta_label, CancelTarget, FileItem, FolderItem, FolderTreeRow, PocketVault, Session,
 };
 use crate::theme;
-use pocketvault_core::is_previewable;
+use pocketvault_core::{is_previewable, RepackPhase};
 
 use super::rows::{file_row, folder_row, folder_tree_row, section_label, sidebar_item};
+
+/// The full-screen blocking view shown in place of the vault browser while
+/// `active_repack_job` is set — per the feature doc, segment processing must
+/// block essentially every vault operation, not just show a banner like the
+/// other job kinds (see `PocketVault::any_job_active`).
+pub fn repack_blocking_view(app: &PocketVault) -> Element<'_, Message> {
+    let Some(job) = &app.active_repack_job else {
+        return column![].into();
+    };
+
+    let phase = job.control.phase();
+    let phase_label = match phase {
+        RepackPhase::Copying => "Reorganizing your vault…",
+        RepackPhase::Verifying => "Verifying the new layout…",
+        RepackPhase::Committing => "Committing the new layout…",
+    };
+
+    let done = job
+        .control
+        .bytes_done
+        .load(Ordering::Relaxed)
+        .min(job.total_bytes);
+    let fraction = if job.total_bytes == 0 {
+        1.0
+    } else {
+        done as f32 / job.total_bytes as f32
+    };
+
+    let mut content = column![
+        text("Segment is processing").size(20).color(theme::text()),
+        text("PocketVault is reorganizing your vault.")
+            .size(13)
+            .color(theme::text_secondary()),
+        container(column![]).height(Length::Fixed(12.0)),
+        text(phase_label).size(13).color(theme::text()),
+        progress_bar(0.0..=1.0, fraction).length(Length::Fixed(360.0)),
+        text(format!(
+            "{} / {}",
+            crate::state::format_size(done),
+            crate::state::format_size(job.total_bytes)
+        ))
+        .size(12)
+        .color(theme::text_secondary()),
+        container(column![]).height(Length::Fixed(12.0)),
+    ]
+    .spacing(10)
+    .align_x(Horizontal::Center);
+
+    if phase == RepackPhase::Copying && !job.cancelling {
+        content = content.push(
+            button(text("Cancel").size(13))
+                .padding([8, 16])
+                .style(|_theme, status| theme::danger_button(status))
+                .on_press(Message::RequestCancelJob(CancelTarget::Repack)),
+        );
+    } else if job.cancelling {
+        content = content.push(text("Cancelling…").size(13).color(theme::text_secondary()));
+    }
+
+    content = content.push(
+        text("Please do not close the application or disconnect the storage device.")
+            .size(12)
+            .color(theme::text_secondary()),
+    );
+
+    container(content)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Horizontal::Center)
+        .align_y(Vertical::Center)
+        .style(theme::container_with_bg(theme::content_bg()))
+        .into()
+}
 
 /// Builds the sidebar's folder tree: root folders, plus their direct children
 /// when expanded. Capped at 2 levels — a depth-1 folder never shows a chevron
@@ -73,7 +147,7 @@ fn content_files(session: &Session, folder_id: Option<&str>) -> Vec<FileItem> {
             } else {
                 FileItem {
                     id: f.id.clone(),
-                    display_name: f.pv_filename.clone(),
+                    display_name: format!("(unreadable: {})", f.id),
                     modified_str: "—".into(),
                     size_str: "—".into(),
                     kind: ".pv File".into(),
@@ -229,6 +303,15 @@ pub fn view(app: &PocketVault) -> Element<'_, Message> {
                 false,
                 false,
                 interaction_allowed.then_some(Message::ShowChangePasswordScreen),
+                None,
+            ),
+            sidebar_item(
+                "Storage".to_string(),
+                None,
+                false,
+                false,
+                false,
+                interaction_allowed.then_some(Message::OpenSettings),
                 None,
             ),
             sidebar_item(

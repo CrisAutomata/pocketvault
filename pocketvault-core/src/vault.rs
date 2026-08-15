@@ -1,24 +1,48 @@
 use std::{
-    fs,
+    fs::{self, File, TryLockError},
     io::{BufReader, BufWriter, Write},
     path::{Path, PathBuf},
     sync::atomic::Ordering,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-
-use uuid::Uuid;
 
 use crate::{
     crypto::VaultKey,
     error::{Result, VaultError},
     meta::{VaultFileEntry, VaultFolder, VaultMeta},
-    pv_format::{read_pv, read_pv_body, read_pv_metadata, write_pv, JobControl, PvMetadata},
+    pv_format::{read_pv, read_pv_body, read_pv_metadata, JobControl, PvMetadata},
+    segment::{RepackControl, SegmentStore},
 };
+
+/// Cross-process advisory lock on `vault.lock`, held for as long as any clone
+/// of this `Vault` is alive (shared via `Arc`, not re-acquired per clone) —
+/// segments are shared, appended-to files, unlike the old one-file-per-item
+/// layout, so two processes opening the same vault concurrently could
+/// otherwise corrupt them.
+#[derive(Debug)]
+pub struct VaultLock(#[allow(dead_code)] File);
+
+fn acquire_lock(base_dir: &Path) -> Result<Arc<VaultLock>> {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(base_dir.join("vault.lock"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Arc::new(VaultLock(file))),
+        Err(TryLockError::WouldBlock) => Err(VaultError::VaultLockedByAnotherProcess),
+        Err(TryLockError::Error(e)) => Err(VaultError::Io(e)),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Vault {
     pub base_dir: PathBuf,
     pub meta: VaultMeta,
+    /// Held only for its `Drop` impl (releases the advisory lock) — never
+    /// read, so `#[allow(dead_code)]` rather than a false "unused field".
+    #[allow(dead_code)]
+    lock: Arc<VaultLock>,
 }
 
 impl Vault {
@@ -29,6 +53,7 @@ impl Vault {
         }
 
         fs::create_dir_all(base_dir.join("vault"))?;
+        let lock = acquire_lock(base_dir)?;
 
         let (meta, _dek) = VaultMeta::create_new(password)?;
         let json = serde_json::to_string_pretty(&meta)?;
@@ -37,6 +62,7 @@ impl Vault {
         Ok(Vault {
             base_dir: base_dir.to_path_buf(),
             meta,
+            lock,
         })
     }
 
@@ -45,11 +71,13 @@ impl Vault {
         if !meta_path.exists() {
             return Err(VaultError::VaultNotFound);
         }
+        let lock = acquire_lock(base_dir)?;
         let json = fs::read_to_string(&meta_path)?;
         let meta: VaultMeta = serde_json::from_str(&json)?;
         Ok(Vault {
             base_dir: base_dir.to_path_buf(),
             meta,
+            lock,
         })
     }
 
@@ -63,16 +91,34 @@ impl Vault {
         self.base_dir.join("vault")
     }
 
-    fn pv_path(&self, pv_filename: &str) -> PathBuf {
-        self.vault_dir().join(pv_filename)
-    }
-
     // ── Persistence ─────────────────────────────────────────────────────────
 
+    /// Writes to a temp file in the vault directory and renames it over
+    /// `vault.meta` — a crash mid-write can't corrupt the manifest, unlike a
+    /// plain `fs::write`. Now higher-stakes than before segmentation: this
+    /// file is the only map to every item's location inside shared segments.
     pub fn save(&self) -> Result<()> {
         let json = serde_json::to_string_pretty(&self.meta)?;
-        fs::write(self.base_dir.join("vault.meta"), json)?;
+        let tmp_path = self.base_dir.join("vault.meta.tmp");
+        fs::write(&tmp_path, json)?;
+        fs::rename(&tmp_path, self.base_dir.join("vault.meta"))?;
         Ok(())
+    }
+
+    /// Reorganizes the physical segment layout to `new_target_bytes` (see
+    /// `SegmentSettings`), without ever decrypting/re-encrypting an item.
+    /// `reclaim`, when true, forces a repack (compacting dead space from
+    /// deletes) even if the target size isn't changing.
+    pub fn repack(
+        &mut self,
+        new_target_bytes: Option<u64>,
+        reclaim: bool,
+        key: &VaultKey,
+        control: &RepackControl,
+    ) -> Result<()> {
+        let mut store = SegmentStore::new(self.vault_dir(), &mut self.meta);
+        store.repack(new_target_bytes, reclaim, key, control)?;
+        self.save()
     }
 
     // ── Folder operations ────────────────────────────────────────────────────
@@ -101,14 +147,11 @@ impl Vault {
     /// Deletes `folder_id` and its whole subtree, returning the ids of every
     /// file that was removed (so a caller can prune any cached metadata for
     /// them — a folder delete can remove many files, not just direct children).
+    ///
+    /// Only drops the manifest entries — see `delete_file_inner` for why the
+    /// underlying bytes aren't reclaimed until a repack.
     pub fn delete_folder(&mut self, folder_id: &str) -> Result<Vec<String>> {
         let removed = self.meta.remove_folder(folder_id);
-        for f in &removed {
-            let path = self.pv_path(&f.pv_filename);
-            if path.exists() {
-                fs::remove_file(path)?;
-            }
-        }
         self.save()?;
         Ok(removed.into_iter().map(|f| f.id).collect())
     }
@@ -168,26 +211,18 @@ impl Vault {
             mime_type: mime_for(filename),
         };
 
-        let pv_filename = format!("{}.pv", Uuid::new_v4());
-        let pv_path = self.pv_path(&pv_filename);
-
         // Streams the source through in fixed-size chunks (see `write_pv`)
         // instead of reading the whole file into memory first — a multi-GB
         // import previously allocated a same-sized `Vec<u8>` up front, which
-        // could exhaust memory and abort the process. Buffered so each
-        // chunk's 3 small writes (nonce, length, ciphertext) don't each cost
-        // a separate write syscall.
+        // could exhaust memory and abort the process. The envelope is
+        // appended into the vault's active segment rather than a dedicated
+        // file — see `SegmentStore::append_item`.
         let source_file = BufReader::new(fs::File::open(source)?);
-        let mut file = BufWriter::new(fs::File::create(&pv_path)?);
-        let write_result = write_pv(&mut file, key, &pv_meta, source_file, control)
-            .and_then(|()| file.flush().map_err(VaultError::from));
-        if let Err(e) = write_result {
-            drop(file);
-            let _ = fs::remove_file(&pv_path); // no partial .pv left behind on cancel/error
-            return Err(e);
-        }
+        let mut store = SegmentStore::new(self.vault_dir(), &mut self.meta);
+        let (segment_index, offset, length) =
+            store.append_item(key, &pv_meta, source_file, control)?;
 
-        let id = self.meta.add_file(&pv_filename, folder_id);
+        let id = self.meta.add_file(segment_index, offset, length, folder_id);
 
         Ok(id)
     }
@@ -305,16 +340,14 @@ impl Vault {
     /// Same as `delete_file` but without the persist — used by `encrypt_files`'s
     /// rollback path, which saves once after the whole rollback instead of once
     /// per file removed.
+    ///
+    /// Only drops the manifest entry — the item's bytes inside its segment
+    /// are dead space until the next repack, not reclaimed immediately (see
+    /// `SegmentStore::repack`'s `reclaim` option).
     fn delete_file_inner(&mut self, file_id: &str) -> Result<()> {
-        let entry = self
-            .meta
+        self.meta
             .remove_file(file_id)
             .ok_or_else(|| VaultError::FileNotFound(file_id.to_string()))?;
-
-        let path = self.pv_path(&entry.pv_filename);
-        if path.exists() {
-            fs::remove_file(path)?;
-        }
         Ok(())
     }
 
@@ -332,7 +365,7 @@ impl Vault {
             .find(|f| f.id == file_id)
             .ok_or_else(|| VaultError::FileNotFound(file_id.to_string()))?;
 
-        let mut f = BufReader::new(fs::File::open(self.pv_path(&entry.pv_filename))?);
+        let mut f = BufReader::new(crate::segment::read_item(&self.vault_dir(), &self.meta, entry)?);
         let meta = read_pv_metadata(&mut f, key)?;
 
         let dest = dest_dir.join(&meta.original_name);
@@ -414,7 +447,7 @@ impl Vault {
             .find(|f| f.id == file_id)
             .ok_or_else(|| VaultError::FileNotFound(file_id.to_string()))?;
 
-        let mut f = fs::File::open(self.pv_path(&entry.pv_filename))?;
+        let mut f = crate::segment::read_item(&self.vault_dir(), &self.meta, entry)?;
         read_pv_metadata(&mut f, key)
     }
 
@@ -426,7 +459,7 @@ impl Vault {
             .find(|f| f.id == file_id)
             .ok_or_else(|| VaultError::FileNotFound(file_id.to_string()))?;
 
-        let mut f = BufReader::new(fs::File::open(self.pv_path(&entry.pv_filename))?);
+        let mut f = BufReader::new(crate::segment::read_item(&self.vault_dir(), &self.meta, entry)?);
         read_pv(&mut f, key)
     }
 
@@ -553,6 +586,21 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn second_open_is_rejected_while_first_is_still_held() {
+        let d = TempDir::new().unwrap();
+        let _first = make_vault(d.path());
+
+        assert!(matches!(
+            Vault::open(d.path()),
+            Err(VaultError::VaultLockedByAnotherProcess)
+        ));
+
+        drop(_first);
+        // Releasing the first handle frees the lock for the next opener.
+        assert!(Vault::open(d.path()).is_ok());
+    }
+
     // ── Encrypt / export ─────────────────────────────────────────────────
 
     #[test]
@@ -578,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn pv_file_stored_with_uuid_name() {
+    fn encrypted_item_lands_in_the_active_segment_not_a_dedicated_file() {
         let d = TempDir::new().unwrap();
         let mut v = make_vault(d.path());
         let key = unlock(&v);
@@ -588,9 +636,11 @@ mod tests {
         v.encrypt_file(&path, None, &key, &JobControl::default())
             .unwrap();
 
-        let pv_name = &v.meta.files[0].pv_filename;
-        assert!(pv_name.ends_with(".pv"));
-        assert_ne!(pv_name.as_str(), "secret.txt.pv"); // UUID, not original name
+        let entry = &v.meta.files[0];
+        assert_eq!(entry.segment_index, 1);
+        assert_eq!(entry.offset, 0);
+        assert!(entry.length > 0);
+        assert!(v.vault_dir().join("active.pv").exists());
     }
 
     #[test]
@@ -660,7 +710,7 @@ mod tests {
     // ── Delete ───────────────────────────────────────────────────────────
 
     #[test]
-    fn delete_removes_file_and_pv() {
+    fn delete_removes_manifest_entry_but_leaves_segment_file_for_later_reclaim() {
         let d = TempDir::new().unwrap();
         let mut v = make_vault(d.path());
         let key = unlock(&v);
@@ -674,12 +724,14 @@ mod tests {
             )
             .unwrap();
 
-        let pv_path = v.vault_dir().join(&v.meta.files[0].pv_filename);
-        assert!(pv_path.exists());
+        let segment_path = v.vault_dir().join("active.pv");
+        assert!(segment_path.exists());
 
         v.delete_file(&fid).unwrap();
         assert!(v.meta.files.is_empty());
-        assert!(!pv_path.exists());
+        // The segment file itself isn't deleted — its dead bytes are only
+        // reclaimed by an explicit repack (see `SegmentStore::repack`).
+        assert!(segment_path.exists());
     }
 
     // ── Folders ──────────────────────────────────────────────────────────
@@ -907,9 +959,11 @@ mod tests {
         assert!(matches!(err, VaultError::Io(_)));
 
         // a.txt and b.txt were encrypted successfully before the failure, but
-        // the whole batch is all-or-nothing, so both are rolled back.
+        // the whole batch is all-or-nothing, so both are rolled back — their
+        // manifest entries are gone even though the segment file that holds
+        // their now-orphaned bytes isn't deleted (dead space is only
+        // reclaimed by an explicit repack, see `SegmentStore::repack`).
         assert!(v.meta.files.is_empty());
-        assert!(fs::read_dir(v.vault_dir()).unwrap().next().is_none());
     }
 
     #[test]
